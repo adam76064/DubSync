@@ -1,0 +1,13 @@
+{
+  "_comment": "Copy this to test_files/manifest.json (gitignored) and fill in real media paths to run the real-fixture regression matrix on your own machine. known_cuts are (ref_start, ref_end) in seconds.",
+  "monkie_kid": {
+    "ref": "test_files/monkie_kid_s01e01_ref.mkv",
+    "tar": "test_files/monkie_kid_s01e01_ara.mkv",
+    "known_cuts": []
+  },
+  "hero108_ep3": {
+    "ref": "test_files/hero108_s01e03_ref.mkv",
+    "tar": "test_files/hero108_s01e03_ara.mkv",
+    "known_cuts": [[616.7, 626.2]]
+  }
+}
