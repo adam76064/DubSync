@@ -9,6 +9,104 @@ output was measured independently of the tool's own reporting.
 This review is **read-only**: no engine behaviour was changed. Everything below is reproducible
 with the harness in [`tests/`](tests/README.md).
 
+> **⚠️ Addendum — see [section 0](#0-addendum-review-of-b9ed707-latest-commit).**
+> While this review was being written, `main` received `2779d72` and `b9ed707`
+> ("Tier 0 Chromaprint Bootstrap, Micro-DTW, R128"). Those commits are now merged into this
+> branch and reviewed separately: **as committed, `b9ed707` cannot run at all** — three
+> `AttributeError`s, one of which fires on 100% of default runs. F1, F2, F3 and F5 are
+> untouched by it.
+
+---
+
+## 0. Addendum: review of `b9ed707` (latest commit)
+
+Reviewed after merging `origin/main` (`2779d72` + `b9ed707`) into this branch.
+`b9ed707` adds `chromaprint_bootstrap.py` (Tier 0 global offset), `micro_dtw.py`
+(sub-segment word-boundary tightening), a rewritten `verifier_engine.py` and a rewritten
+`audio_splicer.py` (+1 119 / −316 lines).
+
+### N1–N3 🔴 Blockers: the commit was never executed end-to-end
+
+Three symbols are referenced but never defined. Each is a live `AttributeError`:
+
+| Where | Missing symbol | Fires on |
+|:--|:--|:--|
+| `micro_dtw.py:234` | `config.broadcast_snap()` | **every run** — `enable_micro_dtw` defaults to `True`, reached from `pipeline.py:158` |
+| `verifier_engine.py:135` | `config.verifier_corr_min` | every run that produces a fallback segment |
+| `audio_splicer.py:223` | `FallbackMode.ADAPTIVE` | every run that renders a fallback segment |
+
+Verified empirically — all three strategies crash:
+
+```
+micro_dtw=1 verifier=1  ->  AttributeError: 'DubSyncConfig' object has no attribute 'broadcast_snap'
+micro_dtw=0 verifier=1  ->  AttributeError: 'DubSyncConfig' object has no attribute 'verifier_corr_min'
+micro_dtw=0 verifier=0  ->  AttributeError: ADAPTIVE
+```
+
+`verifier_engine.py:10` even claims `* FIXED: Correlation threshold (0.48) is now configurable
+via config.verifier_corr_min` — the field was never added to the dataclass.
+
+**This is the same defect class as F2/F7** (`config.fps_ratio`,
+`config.min_scene_duration_sec`). The `xfail` spec
+`test_core_types_define_every_attribute_the_code_touches` now catches all four, including the
+method and enum cases.
+
+### F1 is still unfixed — and now actively misleading
+
+`verifier_engine.py:181-183` in the *new* verifier:
+
+```python
+mean_alignment_error_ms     = 24.5,   # Updated from empirical drift
+max_alignment_error_ms      = 38.0,
+passed_windows_pct          = 99.2,
+```
+
+Still literals. The new comment asserts they are measurements. The rewrite added genuinely
+useful machinery around them (adaptive noise floor, gain-normalised SNR, `_fast_norm_corr`,
+micro-gap merging) but the number that reaches the user is still a constant.
+
+### Stage 3 (Chromaprint bootstrap) is decorative
+
+`global_offset_sec` is computed and printed, then **never used**:
+
+```python
+global_offset_sec = bootstrap_result.offset_sec          # pipeline.py:89
+console.print(f"... Global Offset = {global_offset_sec:+.3f}s ...")
+# <- nothing downstream ever reads it
+```
+
+The module docstring says it "shrinks those search windows to ±5-8s, reducing the O(N²) DP
+candidate count by ~50-80x". It shrinks nothing: no matcher receives the offset or the
+`search_radius`. On the fixture it reported `+12.647s (Confidence: 1.00)` — meaningless, since
+the true offset sweeps linearly from 0 s to 2.5 s. Its `confidence` is
+`peak / (mean_abs * 6.0)` clipped to `[0,1]`, which saturates at `1.00` for essentially any
+peaked signal, so the displayed confidence carries no information.
+
+### What the rewrite did improve
+
+* **F11 partly fixed** — `archive/` (7.3 MB vendored `audalign`) and `tools/dub_sync.py` deleted.
+* **F6 partly fixed** — the 506-line splicer rewrite deleted the dead `final_audio` buffer and
+  unused crossfade curves, and added real two-pass EBU R128 loudness normalisation.
+  But the timeline is still assembled with the `concat` demuxer, so `zero_crossing_snap` and
+  `crossfade_duration_ms` remain no-ops and **every segment boundary is still a hard cut**.
+* **F7 fixed** — `min_scene_duration_sec` is now defined.
+
+### Measured effect (crashes patched locally, not committed)
+
+| Strategy | mean abs. error `f84fdcc` → `b9ed707` | within ±120 ms `f84fdcc` → `b9ed707` |
+|:--|:--|:--|
+| `--matcher visual` | 466 ms → **403 ms** | 89.7 % → **85.7 %** |
+| **default** (`auto`/`hybrid`) | 3 133 ms → **1 969 ms** | 3.4 % → **39.3 %** |
+| `--strategy dtw` | 4 003 ms → **1 880 ms** | 0.0 % → **3.6 %** |
+
+So: a real improvement on the default path, a slight regression on the visual path, and
+**duration drift got worse** — `+32 ms` → `−75 / −224 / −416 ms`, because Micro-DTW splits the
+timeline into 34–47 sub-segments and each is truncated by its own `-t`. Every run still
+reports `24.5 ms / 99.2 %`.
+
+**Bottom line:** the new direction is sound, but it needs the three missing symbols before it
+can run at all, and it does not touch F1, F2, F3 or F5.
+
 ---
 
 ## 1. Verdict

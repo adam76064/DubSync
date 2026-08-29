@@ -21,7 +21,7 @@ sys.path.insert(0, ROOT)
 
 from dub_sync_engine.audio_splicer import AudioSplicerEngine  # noqa: E402
 from dub_sync_engine.block_segmenter import BlockSegmenterEngine  # noqa: E402
-from dub_sync_engine.config import DubSyncConfig  # noqa: E402
+from dub_sync_engine.config import DubSyncConfig, FallbackMode, Preset  # noqa: E402
 from dub_sync_engine.consensus_engine import MultiModalConsensusEngine  # noqa: E402
 from dub_sync_engine.pipeline import DubSyncPipeline  # noqa: E402
 from dub_sync_engine.visual_anchors import AnchorMatch  # noqa: E402
@@ -66,25 +66,45 @@ def test_audit_metrics_are_measured_not_hardcoded(tmp_path):
 
 
 # ------------------------------------------------------------- F2 / F7
-@xfail(reason="F2/F7: code reads config fields that DubSyncConfig does not define")
-def test_config_defines_every_field_the_code_reads():
-    """Guards the whole class of 'hasattr(...) is silently always False' bugs."""
+@xfail(reason="F2/F7/N1-N3: code touches attributes that the config/enums do not define")
+def test_core_types_define_every_attribute_the_code_touches():
+    """
+    Guards the whole class of 'attribute does not exist' bugs.
+
+    Every one of these is a live AttributeError on some code path:
+      consensus_engine.py:51  config.fps_ratio        (silently False -> g_speed=0.96)
+      verifier_engine.py:135  config.verifier_corr_min (CRASH, latest commit)
+      micro_dtw.py:234        config.broadcast_snap()  (CRASH, latest commit)
+      audio_splicer.py:223    FallbackMode.ADAPTIVE    (CRASH, latest commit)
+    """
     pkg = os.path.join(ROOT, "dub_sync_engine")
+
+    # name -> live instance/class to check the attribute against
+    targets = {
+        "config": DubSyncConfig(),
+        "FallbackMode": FallbackMode,
+        "Preset": Preset,
+    }
+
     missing = {}
     for fname in sorted(f for f in os.listdir(pkg) if f.endswith(".py")):
         tree = ast.parse(open(os.path.join(pkg, fname)).read())
-        calls = {id(n.func) for n in ast.walk(tree)
-                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Attribute) or id(node) in calls:
+            if not isinstance(node, ast.Attribute):
                 continue
             v = node.value
-            is_cfg = (isinstance(v, ast.Name) and v.id == "config") or \
-                     (isinstance(v, ast.Attribute) and v.attr == "config")
-            if is_cfg and not hasattr(DubSyncConfig(), node.attr):
+            # self.config.X  /  config.X  /  FallbackMode.X  /  Preset.X
+            owner = None
+            if isinstance(v, ast.Name):
+                owner = targets.get(v.id)
+            elif isinstance(v, ast.Attribute) and v.attr == "config":
+                owner = targets["config"]
+            if owner is None:
+                continue
+            if not hasattr(owner, node.attr):
                 missing.setdefault(f"{fname}:{node.lineno}", node.attr)
 
-    assert not missing, f"config fields read but never defined: {missing}"
+    assert not missing, f"attributes touched but never defined: {missing}"
 
 
 # ------------------------------------------------------------------ F3
@@ -139,10 +159,16 @@ def test_cli_exposes_the_flags_documented_in_the_readme():
 
 
 # ------------------------------------------------------------------ F6
-@xfail(reason="F6: crossfade buffers are built then discarded; segments are hard-cut")
-def test_renderer_writes_into_the_crossfade_buffer():
-    src = inspect.getsource(AudioSplicerEngine.render_and_splice)
-    assert "final_audio[" in src, "output buffer is allocated but never written to"
+@xfail(reason="F6: segments are still hard-joined by the concat demuxer; no crossfade")
+def test_renderer_crossfades_segment_boundaries():
+    """
+    The v3.5 rewrite deleted the dead crossfade buffers (good) but still assembles
+    the timeline with the ffmpeg concat demuxer, so zero_crossing_snap and
+    crossfade_duration_ms remain no-ops and every segment boundary is a hard cut.
+    """
+    src = inspect.getsource(AudioSplicerEngine)
+    assert "concat" not in src or "crossfade" in src.lower(), \
+        "timeline is assembled by hard concatenation with no crossfade mixing"
 
 
 # ----------------------------------------------------------------- F13
