@@ -82,36 +82,45 @@ class DubSyncPipeline:
             os.makedirs(frames_dir, exist_ok=True)
             ref_anchors, tar_anchors = [], []
 
-            if self.config.matcher_mode not in ["audio", "spectral", "vad"]:
-                with console.status(f"[bold cyan]Stage 3/7 (Sequence-Verified Visual): Safe-zone center-crop ({int(self.config.center_crop_ratio*100)}%) keyframe extraction...[/bold cyan]", spinner="dots"):
+            if self.config.matcher_mode not in ["spectral", "vad"]:
+                with console.status(f"[bold cyan]Stage 3/7: Safe-zone center-crop ({int(self.config.center_crop_ratio*100)}%) keyframe extraction...[/bold cyan]", spinner="dots"):
                     ref_anchors = self.visual_engine.extract_keyframes(ref_path, frames_dir, "ref")
                     tar_anchors = self.visual_engine.extract_keyframes(tar_path, frames_dir, "tar")
                     console.print(f"  [bold green][OK][/bold green] Extracted {len(ref_anchors)} reference anchors & {len(tar_anchors)} foreign anchors.")
             else:
-                console.print(f"  [bold green][OK][/bold green] [bold cyan]Pure Acoustic Mode Active:[/bold cyan] Bypassing video keyframe extraction. Running instant sub-10ms acoustic transient alignment.")
+                console.print(f"  [bold cyan][*][/bold cyan] Matcher mode set to [bold yellow]'{self.config.matcher_mode}'[/bold yellow]: Skipping video keyframing and running direct audio alignment.")
 
-            # --- STAGE 4: Dual-Layer Cross-Validated Consensus Alignment ---
+            # --- STAGE 4: Multi-Modal Consensus Anchor Alignment ---
             visual_matches = []
             strategy = self.config.sync_strategy
             mode = self.config.matcher_mode
 
-            if mode == "orb":
+            if strategy == "hybrid" or mode == "auto":
+                with console.status("[bold cyan]Stage 4/7 (Multi-Modal Consensus): Fusing Visual Keyframes, Background Music Transients & Silero Neural VAD...[/bold cyan]", spinner="dots"):
+                    visual_matches = self.consensus_engine.discover_consensus_anchors(
+                        ref_anchors, tar_anchors, ref_wav, tar_wav, ref_info.duration, tar_info.duration
+                    )
+                console.print(f"  [bold green][OK][/bold green] [bold cyan]Multi-Modal Consensus Lattice[/bold cyan] constructed [bold green]{len(visual_matches)} strong cross-modal anchors[/bold green].")
+
+            elif mode == "vad":
+                with console.status("[bold cyan]Stage 4/7 (Direct ML VAD): Running Neural Silero Voice Activity Speech Burst Discovery...[/bold cyan]", spinner="dots"):
+                    visual_matches = self.vad_engine.discover_speech_anchors(ref_wav, tar_wav, ref_info.duration, tar_info.duration)
+                console.print(f"  [bold green][OK][/bold green] [bold cyan]ML VAD Engine[/bold cyan] discovered [bold green]{len(visual_matches)} speech dialogue anchors[/bold green].")
+
+            elif mode == "spectral":
+                with console.status("[bold cyan]Stage 4/7 (Tier 3 Direct): Running Vocal-Suppressed Spectral Audio Fingerprint Discovery...[/bold cyan]", spinner="dots"):
+                    visual_matches = self.spectral_engine.discover_spectral_anchors(ref_wav, tar_wav, ref_info.duration, tar_info.duration)
+                console.print(f"  [bold green][OK][/bold green] [bold cyan]Tier 3 (Spectral Fingerprint)[/bold cyan] discovered [bold green]{len(visual_matches)} acoustic background anchors[/bold green].")
+
+            elif mode == "orb":
                 with console.status("[bold cyan]Stage 4/7 (Tier 2 Direct): Running Scale- & Aspect-Invariant ORB Line-Art Matcher...[/bold cyan]", spinner="dots"):
                     visual_matches = self.orb_matcher.match_anchors_orb(ref_anchors, tar_anchors)
                 console.print(f"  [bold green][OK][/bold green] [bold cyan]Tier 2 (ORB Line-Art)[/bold cyan] recovered [bold green]{len(visual_matches)} scale-invariant anchors[/bold green].")
 
-            elif mode == "visual":
+            else:
                 with console.status("[bold cyan]Stage 4/7 (Tier 1 Direct): Running Primary Multi-Descriptor Visual Hash Matching...[/bold cyan]", spinner="dots"):
                     visual_matches = self.visual_engine.match_anchors(ref_anchors, tar_anchors)
                 console.print(f"  [bold green][OK][/bold green] [bold cyan]Tier 1 (Visual Hash)[/bold cyan] formed [bold green]{len(visual_matches)} visual anchors[/bold green].")
-
-            else:
-                # Default / Hybrid: Dual-Layer Cross-Validated Consensus (Sequence-Verified Visual + Acoustic Music + Silero VAD)
-                with console.status("[bold cyan]Stage 4/7 (Dual-Layer Consensus): Fusing Sequence-Verified Visual Cuts, Music Transients (800Hz-3.5kHz) & Silero VAD...[/bold cyan]", spinner="dots"):
-                    visual_matches = self.consensus_engine.discover_consensus_anchors(
-                        ref_anchors, tar_anchors, ref_wav, tar_wav, ref_info.duration, tar_info.duration
-                    )
-                console.print(f"  [bold green][OK][/bold green] [bold cyan]Dual-Layer Consensus Engine[/bold cyan] locked [bold green]{len(visual_matches)} cross-validated frame-accurate timing knots[/bold green].")
 
             # --- STAGE 5: Adaptive Block Clustering or Neural DTW Warping ---
             if strategy == "dtw":

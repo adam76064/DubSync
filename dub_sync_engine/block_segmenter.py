@@ -314,16 +314,14 @@ class BlockSegmenterEngine:
 
             if 0.90 <= speed <= 1.10:
                 # Scenario A: Continuous Dialogue Scene
-                # Exact Scaled Target Slice: dt_scaled = dr * g_speed
-                # Guarantees Output Duration == dr with 0.000ms delta and ZERO drift
-                dt_scaled = dr * g_speed
+                # Lock speed strictly to calibrated broadcast standard (e.g. 0.960000x PAL)
                 edl.append(SegmentEDL(
                     seg_id=seg_id,
                     segment_type="dub",
                     ref_start=round(a1.ref_time, 3),
                     ref_end=round(a2.ref_time, 3),
                     tar_start=round(a1.tar_time, 3),
-                    tar_end=round(a1.tar_time + dt_scaled, 3),
+                    tar_end=round(a2.tar_time, 3),
                     speed_factor=g_speed,
                     confidence=min(a1.confidence, a2.confidence)
                 ))
@@ -334,15 +332,14 @@ class BlockSegmenterEngine:
                 dub_ref_len = dt / g_speed
                 cut_ref_len = dr - dub_ref_len
 
-                if dub_ref_len >= 2.0:
-                    dt_scaled = dub_ref_len * g_speed
+                if dub_ref_len >= 1.0:
                     edl.append(SegmentEDL(
                         seg_id=seg_id,
                         segment_type="dub",
                         ref_start=round(a1.ref_time, 3),
                         ref_end=round(a1.ref_time + dub_ref_len, 3),
                         tar_start=round(a1.tar_time, 3),
-                        tar_end=round(a1.tar_time + dt_scaled, 3),
+                        tar_end=round(a2.tar_time, 3),
                         speed_factor=g_speed,
                         confidence=min(a1.confidence, a2.confidence)
                     ))
@@ -361,7 +358,7 @@ class BlockSegmenterEngine:
                         ))
                         seg_id += 1
                 else:
-                    # Dub span is tiny (< 2.0s blip) - bridge entire cut cleanly
+                    # Dub span is tiny (< 1.0s blip) - bridge entire cut cleanly
                     edl.append(SegmentEDL(
                         seg_id=seg_id,
                         segment_type="fallback",
@@ -376,13 +373,12 @@ class BlockSegmenterEngine:
 
             else:
                 # Scenario C: Extended Foreign Intro / Extra Scene
-                dt_scaled = dr * g_speed
                 edl.append(SegmentEDL(
                     seg_id=seg_id,
                     segment_type="dub",
                     ref_start=round(a1.ref_time, 3),
                     ref_end=round(a2.ref_time, 3),
-                    tar_start=round(max(0.0, a2.tar_time - dt_scaled), 3),
+                    tar_start=round(max(0.0, a2.tar_time - (dr * g_speed)), 3),
                     tar_end=round(a2.tar_time, 3),
                     speed_factor=g_speed,
                     confidence=min(a1.confidence, a2.confidence)

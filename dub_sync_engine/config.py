@@ -37,8 +37,8 @@ class DubSyncConfig:
     use_temporal_burst: bool = True    # 3-frame burst extraction around cuts (t-dt, t, t+dt)
     burst_delta_frames: int = 1        # Delta frame distance for burst
     # --- Matching Mode & Fallbacks ---
-    matcher_mode: str = "hybrid"       # 'hybrid' (Dual-Layer Cross-Validated: Visual Cuts + Music Transients + Neural VAD), 'audio' (Pure Audio), 'visual' (Legacy Visual), 'orb' (Tier 2 ORB)
-    sync_strategy: str = "hybrid"      # 'hybrid' (Dual-Layer Consensus + Closed-Loop Verification), 'blocks' (Macro-Blocks), 'dtw' (Neural DTW)
+    matcher_mode: str = "auto"         # 'auto' (Tier 1->2->3 cascade), 'visual' (Tier 1), 'orb' (Tier 2), 'spectral' (Tier 3), 'vad' (ML VAD)
+    sync_strategy: str = "hybrid"      # 'hybrid' (Multi-Modal Consensus + Closed-Loop Verification), 'blocks' (Macro-Blocks), 'dtw' (Neural DTW)
     enable_auto_verification: bool = True  # Closed-loop self-auditing & false fallback healing
     use_ransac_block_clustering: bool = True
     discontinuity_threshold_sec: float = 0.40  # Threshold to identify real cuts/omissions vs frame jitter
