@@ -51,12 +51,30 @@ class DubSyncConfig:
     audio_sample_rate: int = 48000     # Internal high-fidelity processing sample rate
     speech_band_attenuation: bool = True# Attenuate 300Hz-3.4kHz dialogue to correlate pure M&E
     
+    # --- Tier 0: Chromaprint Acoustic Bootstrap ---
+    enable_chromaprint_bootstrap: bool = True
+    chromaprint_bootstrap_max_offset_sec: float = 120.0
+    
+    # --- Sub-Segment Micro-DTW Word-Boundary Tightening ---
+    enable_micro_dtw: bool = True      # Intra-segment VAD probability DTW for <10ms word sync
+    micro_dtw_band_ms: float = 800.0   # Sakoe-Chiba constraint band (ms)
+    
     # --- Audio Splicing & Retiming ---
     zero_crossing_snap: bool = True    # Snap segment cut boundaries to nearest zero amplitude
     zero_crossing_window_ms: float = 3.0# Search window for zero-crossing in ms
     crossfade_duration_ms: float = 10.0# Equal-power cosine crossfade duration in ms
     max_speed_deformation: float = 0.05# Maximum allowable speed stretch per continuous scene (5%)
+    min_scene_duration_sec: float = 1.0# Minimum duration for independent scene segments
     fallback_mode: FallbackMode = FallbackMode.VOCAL_FILTERED
+    
+    # --- EBU R128 Loudness Normalization ---
+    enable_loudness_norm: bool = True  # Two-pass broadcast standard loudness normalization
+    loudness_target_lufs: float = -23.0# Target integrated loudness (EBU R128 = -23 LUFS)
+    loudness_true_peak_dbtp: float = -1.0# Maximum true peak level in dBTP
+    
+    # --- Closed-Loop Verifier & Healing ---
+    verifier_max_gap_sec: float = 90.0
+    verifier_rms_snr_db: float = 6.0   # Gain-normalized SNR threshold above noise floor
     
     # --- Output Codec & Container ---
     audio_codec: str = "aac"

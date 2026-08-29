@@ -50,9 +50,11 @@ ENV/
 *.eac3
 *.dts
 
-# Test files and sample directories
+# Test files, archives, and sample directories
 test_files/
 sample_files/
+archive/
+tools/
 media/
 videos/
 
