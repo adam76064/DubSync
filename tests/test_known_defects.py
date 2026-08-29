@@ -124,7 +124,9 @@ def test_consensus_speed_is_not_hardcoded():
 
 
 # ------------------------------------------------------------------ F5
-@xfail(reason="F5: README documents a CLI that does not exist")
+# F5 is FIXED: the CLI now accepts --ref/--tar/--out, --matcher-mode,
+# --fallback-mode, --preset studio_ultra and --report. Kept as a regression
+# guard so the README and the parser cannot drift apart again.
 def test_cli_exposes_the_flags_documented_in_the_readme():
     usage = subprocess.run(
         [sys.executable, "-m", "dub_sync_engine.cli", "--help"],

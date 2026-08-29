@@ -97,6 +97,9 @@ class DubSyncConfig:
     keep_subtitles: bool = True
     qc_report_html: bool = True
     
+    # --- Reporting ---
+    enable_reports: bool = True        # Write JSON + Markdown forensic reports
+    
     # --- Debug & Performance ---
     num_threads: int = 0               # 0 = auto-detect all available CPU cores
     verbose: bool = False

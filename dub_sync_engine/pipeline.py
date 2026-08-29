@@ -311,11 +311,12 @@ class DubSyncPipeline:
                 }
             }
 
-            from .qc_report import ForensicReportGenerator
-            json_report, md_report = ForensicReportGenerator.generate_and_save(forensic_payload, output_path)
-            console.print(f"  [bold green][OK][/bold green] Comprehensive Forensic Diagnostic Report saved:")
-            console.print(f"       -> JSON: [cyan]{json_report}[/cyan]")
-            console.print(f"       -> Markdown: [cyan]{md_report}[/cyan]")
+            if self.config.enable_reports:
+                from .qc_report import ForensicReportGenerator
+                json_report, md_report = ForensicReportGenerator.generate_and_save(forensic_payload, output_path)
+                console.print(f"  [bold green][OK][/bold green] Comprehensive Forensic Diagnostic Report saved:")
+                console.print(f"       -> JSON: [cyan]{json_report}[/cyan]")
+                console.print(f"       -> Markdown: [cyan]{md_report}[/cyan]")
 
             console.print()
             # Summary display
