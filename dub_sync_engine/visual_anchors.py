@@ -173,8 +173,13 @@ class VisualAnchorEngine:
                         continue
 
                     # Base confidence and score
-                    confidence = max(0.0, 1.0 - (composite_dist / 12.0)) * (0.5 + 0.5 * max(0.0, color_sim))
-                    score = (12.0 - composite_dist) + (color_sim * 4.0)
+                    # Scale by the configured acceptance distance so confidence
+                    # spans [0, 1] over the range actually admitted. Dividing by
+                    # a magic 12 while max_hash_dist is 14 capped achievable
+                    # confidence at ~0.49, below any sensible fusion threshold.
+                    denom = float(max(1, self.config.max_hash_dist))
+                    confidence = max(0.0, 1.0 - (composite_dist / denom)) * (0.5 + 0.5 * max(0.0, color_sim))
+                    score = (denom - composite_dist) + (color_sim * 4.0)
 
                     # Step 1b: Multi-Frame Temporal Sequence Verification
                     # Look ahead 1 to 2 keyframes to verify sequence rhythm

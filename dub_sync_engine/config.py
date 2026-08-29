@@ -37,6 +37,11 @@ class DubSyncConfig:
     center_crop_ratio: float = 0.80    # Safe-zone center crop (0.80 = center 80%, ignoring logos/bars)
     use_temporal_burst: bool = True    # 3-frame burst extraction around cuts (t-dt, t, t+dt)
     burst_delta_frames: int = 1        # Delta frame distance for burst
+    # --- Broadcast Speed ---
+    fps_ratio: float = 0.0           # dt_tar/dt_ref estimated from the probed frame rates.
+                                     # 0.0 = unknown; the consensus engine then prefers a
+                                     # slope measured from the visual anchors.
+    
     # --- Matching Mode & Fallbacks ---
     matcher_mode: str = "hybrid"       # 'hybrid' (Dual-Layer Cross-Validated: Visual Cuts + Music Transients + Neural VAD), 'audio' (Pure Audio), 'visual' (Legacy Visual), 'orb' (Tier 2 ORB)
     sync_strategy: str = "hybrid"      # 'hybrid' (Dual-Layer Consensus + Closed-Loop Verification), 'blocks' (Macro-Blocks), 'dtw' (Neural DTW)

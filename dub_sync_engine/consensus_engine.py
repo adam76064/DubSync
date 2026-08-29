@@ -13,6 +13,7 @@ from .config import DubSyncConfig
 from .visual_anchors import VisualAnchorEngine, AnchorMatch, VisualAnchor
 from .spectral_fingerprint import SpectralFingerprintEngine
 from .vad_engine import SileroVADEngine
+from .block_segmenter import BlockSegmenterEngine
 
 
 class MultiModalConsensusEngine:
@@ -47,9 +48,25 @@ class MultiModalConsensusEngine:
         """
         candidates: List[Dict[str, Any]] = []
 
-        # Standard broadcast tempo (0.960000x for PAL, 1.000000x for Film)
-        fps_ratio = round(self.config.fps_ratio, 4) if hasattr(self.config, "fps_ratio") else 0.9600
-        g_speed = fps_ratio if 0.92 <= fps_ratio <= 1.05 else 0.9600
+        # --- STEP 0: Visual tier FIRST -------------------------------------
+        # It needs no speed estimate, so running it up front lets the acoustic
+        # tiers below use a MEASURED slope instead of an assumed one. An assumed
+        # 0.96 resamples the dub by the wrong factor and smears every acoustic
+        # correlation - which is why the fusion used to collapse to one anchor.
+        visual_matches: List[AnchorMatch] = []
+        if ref_anchors and tar_anchors:
+            try:
+                visual_matches = self.visual_engine.match_anchors(ref_anchors, tar_anchors)
+            except Exception:
+                visual_matches = []
+
+        # --- Global playback speed: measured > nominal frame rate > 1:1 -----
+        g_speed = None
+        if len(visual_matches) >= 2:
+            g_speed = BlockSegmenterEngine(self.config).calibrate_global_slope(visual_matches)
+        if not g_speed or not (0.90 <= g_speed <= 1.10):
+            fps_ratio = float(getattr(self.config, "fps_ratio", 0.0) or 0.0)
+            g_speed = round(fps_ratio, 6) if 0.92 <= fps_ratio <= 1.05 else 1.0
 
         # --- STEP 1: Background Music & Ambient Sound Transients ---
         try:
@@ -160,29 +177,26 @@ class MultiModalConsensusEngine:
         except Exception:
             pass
 
-        # --- STEP 3: Sequence-Verified Visual Keyframes (Dual-Layer Cross-Validation) ---
-        if ref_anchors and tar_anchors:
-            try:
-                raw_visual_matches = self.visual_engine.match_anchors(ref_anchors, tar_anchors)
-                for m in raw_visual_matches:
-                    # Check acoustic offset confirmation within +/-3.5s
-                    is_acoustically_confirmed = any(
-                        abs(m.ref_time - c["ref_time"]) <= 3.5 and abs(m.offset - c["offset"]) <= 1.5
-                        for c in candidates if c["source"] in ["acoustic_music", "vad_speech"]
-                    )
-
-                    # Only admit visual matches that are confirmed by audio OR part of a sequence chain
-                    if is_acoustically_confirmed or m.confidence >= 0.90:
-                        candidates.append({
-                            "ref_time": m.ref_time,
-                            "tar_time": m.tar_time,
-                            "offset": m.offset,
-                            "confidence": m.confidence,
-                            "source": "visual_cross_validated",
-                            "score": m.confidence * 16.0  # High score for sharp video cuts
-                        })
-            except Exception:
-                pass
+        # --- STEP 3: Sequence-Verified Visual Keyframes (fused, not gated) ---
+        # The visual tier already solved a monotonic DP lattice with physical
+        # speed constraints, so its chain is trustworthy on its own. Acoustic
+        # agreement is a bonus, not a gate: gating on it (previously
+        # confidence >= 0.90, a value the scoring formula could never reach)
+        # silently discarded every visual anchor.
+        for m in visual_matches:
+            is_acoustically_confirmed = any(
+                abs(m.ref_time - c["ref_time"]) <= 3.5 and abs(m.offset - c["offset"]) <= 1.5
+                for c in candidates if c["source"] in ["acoustic_music", "vad_speech"]
+            )
+            candidates.append({
+                "ref_time": m.ref_time,
+                "tar_time": m.tar_time,
+                "offset": m.offset,
+                "confidence": m.confidence,
+                "source": "visual_cross_validated",
+                # High base score for sharp video cuts; acoustic agreement boosts it
+                "score": m.confidence * 16.0 * (1.3 if is_acoustically_confirmed else 1.0)
+            })
 
         if not candidates:
             return []

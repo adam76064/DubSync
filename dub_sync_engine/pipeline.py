@@ -72,6 +72,14 @@ class DubSyncPipeline:
             self.tui.display_media_summary(ref_info, tar_info)
             console.print()
 
+            # Seed the broadcast-speed estimate from the probed frame rates. It is
+            # only a prior: the consensus engine prefers a slope measured from the
+            # visual anchors whenever it has at least two of them.
+            ref_fps = ref_info.primary_video.fps if ref_info.primary_video else None
+            tar_fps = tar_info.primary_video.fps if tar_info.primary_video else None
+            if ref_fps and tar_fps and tar_fps > 0:
+                self.config.fps_ratio = round(ref_fps / tar_fps, 6)
+
             # --- STAGE 2: Extract PCM WAVs ---
             ref_wav = os.path.join(temp_dir, "ref_pcm.wav")
             tar_wav = os.path.join(temp_dir, "tar_pcm.wav")

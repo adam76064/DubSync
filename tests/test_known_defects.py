@@ -41,7 +41,8 @@ def M(rt, tt, c=0.9, hd=3):
 
 
 # ------------------------------------------------------------- F2 / F7
-@xfail(reason="F2/F7/N1-N3: code touches attributes that the config/enums do not define")
+# F2/F7/N1-N3 are FIXED (config.fps_ratio, verifier_corr_min, broadcast_snap and
+# FallbackMode.ADAPTIVE are now defined). Kept as a permanent regression guard.
 def test_core_types_define_every_attribute_the_code_touches():
     """
     Guards the whole class of 'attribute does not exist' bugs.
@@ -114,7 +115,8 @@ def test_spectral_tier_is_reachable():
     assert "discover_spectral_anchors" in src
 
 
-@xfail(reason="F2: consensus falls back to a hard-coded g_speed=0.96")
+# F2 is FIXED: the consensus engine measures the slope from the visual anchors
+# and only falls back to the probed frame rates. Kept as a regression guard.
 def test_consensus_speed_is_not_hardcoded():
     src = inspect.getsource(MultiModalConsensusEngine.discover_consensus_anchors)
     assert re.search(r"g_speed\s*=.*0\.9600", src) is None, \
