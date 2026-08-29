@@ -68,18 +68,8 @@ class BlockSegmenterEngine:
 
         median_slope = float(np.median(slopes))
 
-        # Check standard broadcast ratios:
-        # 1.000000 (1:1 standard)
-        # 24/25 = 0.960000 (PAL slowdown)
-        # 25/24 = 1.041667 (PAL speedup)
-        # 24/23.976 = 1.001001 (NTSC Film pull-down)
-        # 23.976/24 = 0.999000 (Film slowdown)
-        standards = [1.000000, 24.0 / 25.0, 25.0 / 24.0, 24.0 / 23.976, 23.976 / 24.0]
-        for std in standards:
-            if abs(median_slope - std) < 0.005:
-                return round(std, 6)
-
-        return round(median_slope, 6)
+        # Snap to a standard broadcast ratio (1:1, PAL 24/25, PAL 25/24, NTSC pull-down)
+        return self.config.broadcast_snap(median_slope, tol=0.005)
 
     def cluster_into_blocks(
         self,
@@ -148,7 +138,6 @@ class BlockSegmenterEngine:
         # Step 4: Build ContinuousBlock objects from all clusters without dropping single-anchor knots
         blocks: List[ContinuousBlock] = []
         block_id = 0
-        standards = [1.000000, 24.0 / 25.0, 25.0 / 24.0, 24.0 / 23.976, 23.976 / 24.0]
 
         for c_indices in raw_clusters:
             first_m = matches[c_indices[0]]
@@ -159,11 +148,7 @@ class BlockSegmenterEngine:
             # Compute block-level independent speed slope
             if r_span >= 6.0 and len(c_indices) >= 2:
                 raw_block_slope = t_span / r_span
-                block_slope = raw_block_slope
-                for std in standards:
-                    if abs(raw_block_slope - std) < 0.006:
-                        block_slope = std
-                        break
+                block_slope = self.config.broadcast_snap(raw_block_slope, tol=0.006)
                 block_slope = max(0.90, min(1.10, block_slope))
             else:
                 block_slope = global_slope

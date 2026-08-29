@@ -4,13 +4,14 @@ Configuration dataclasses, presets, and constants for DubSync Pro.
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, List
+from typing import Optional, List, ClassVar
 
 
 class FallbackMode(Enum):
     VOCAL_FILTERED = "vocal_filtered"  # English audio with speech attenuated (keeps music/SFX)
     FULL_REFERENCE = "full_reference"  # Raw English audio fallback
     SILENCE = "silence"                # Digital silence during cut duration
+    ADAPTIVE = "adaptive"              # Probe the foreign audio; only bridge if it is missing
 
 
 class Preset(Enum):
@@ -75,6 +76,11 @@ class DubSyncConfig:
     # --- Closed-Loop Verifier & Healing ---
     verifier_max_gap_sec: float = 90.0
     verifier_rms_snr_db: float = 6.0   # Gain-normalized SNR threshold above noise floor
+    verifier_corr_min: float = 0.28    # Gain-normalized correlation threshold (see verifier docstring)
+    # Windowed alignment probing used to report a *measured* sync error
+    verifier_probe_windows: int = 24   # Number of windows probed across the timeline
+    verifier_probe_window_sec: float = 6.0
+    verifier_pass_threshold_ms: float = 50.0  # A window "passes" under this residual error
     
     # --- Output Codec & Container ---
     audio_codec: str = "aac"
@@ -86,6 +92,26 @@ class DubSyncConfig:
     num_threads: int = 0               # 0 = auto-detect all available CPU cores
     verbose: bool = False
     
+    # Broadcast tempo ratios that a real dub transfer can take.
+    # 1.000000 (1:1) | 24/25 (PAL slowdown) | 25/24 (PAL speedup)
+    # 24/23.976 (NTSC pull-down) | 23.976/24 (film slowdown)
+    BROADCAST_STANDARDS: ClassVar[tuple] = (
+        1.000000, 24.0 / 25.0, 25.0 / 24.0, 24.0 / 23.976, 23.976 / 24.0,
+    )
+
+    def broadcast_snap(self, speed: float, tol: float = 0.006) -> float:
+        """
+        Snaps a measured speed ratio to the nearest broadcast standard, so that
+        frame-rate conversions land on exact ratios instead of noisy estimates.
+
+        Returns the input unchanged (rounded) when no standard is within `tol`.
+        Callers are responsible for clamping to a playable range.
+        """
+        for std in self.BROADCAST_STANDARDS:
+            if abs(speed - std) < tol:
+                return round(std, 6)
+        return round(speed, 6)
+
     def apply_preset(self, preset: Preset):
         self.preset = preset
         if preset == Preset.STUDIO_ULTRA:

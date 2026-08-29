@@ -166,9 +166,11 @@ def test_renderer_crossfades_segment_boundaries():
     the timeline with the ffmpeg concat demuxer, so zero_crossing_snap and
     crossfade_duration_ms remain no-ops and every segment boundary is a hard cut.
     """
-    src = inspect.getsource(AudioSplicerEngine)
-    assert "concat" not in src or "crossfade" in src.lower(), \
-        "timeline is assembled by hard concatenation with no crossfade mixing"
+    # A docstring mention of "crossfade" is not enough - the final assembly
+    # must not be delegated wholesale to the concat demuxer.
+    src = inspect.getsource(AudioSplicerEngine.render_and_splice)
+    assert "_ffmpeg_concat" not in src, \
+        "final timeline is hard-concatenated; no crossfade is mixed in"
 
 
 # ----------------------------------------------------------------- F13

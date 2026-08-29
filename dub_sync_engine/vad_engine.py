@@ -278,7 +278,6 @@ class SileroVADEngine:
         # Build EDL from macro nodes
         edl = []
         seg_id = 0
-        standards = [1.000000, 24.0 / 25.0, 25.0 / 24.0, 24.0 / 23.976, 23.976 / 24.0]
 
         for k in range(len(macro_nodes) - 1):
             t_r1, t_t1 = macro_nodes[k]
@@ -291,11 +290,7 @@ class SileroVADEngine:
                 continue
 
             raw_speed = t_dur / r_dur
-            speed = raw_speed
-            for std in standards:
-                if abs(raw_speed - std) < 0.005:
-                    speed = std
-                    break
+            speed = self.config.broadcast_snap(raw_speed, tol=0.005)
             speed = max(0.90, min(1.10, speed))
 
             edl.append(SegmentEDL(
