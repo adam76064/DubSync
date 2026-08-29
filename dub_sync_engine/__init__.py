@@ -18,6 +18,8 @@ from .spectral_fingerprint import SpectralFingerprintEngine
 from .vad_engine import SileroVADEngine
 from .consensus_engine import MultiModalConsensusEngine
 from .verifier_engine import ClosedLoopVerifierEngine, VerificationAudit
+from .chromaprint_bootstrap import ChromaprintBootstrap, GlobalOffsetEstimate
+from .micro_dtw import MicroDTWEngine
 from .acoustic_refine import AcousticRefineEngine
 from .audio_splicer import AudioSplicerEngine, SegmentEDL
 from .mkv_muxer import MKVMuxer
@@ -39,6 +41,9 @@ __all__ = [
     "MultiModalConsensusEngine",
     "ClosedLoopVerifierEngine",
     "VerificationAudit",
+    "ChromaprintBootstrap",
+    "GlobalOffsetEstimate",
+    "MicroDTWEngine",
     "AcousticRefineEngine",
     "AudioSplicerEngine",
     "SegmentEDL",

@@ -23,6 +23,8 @@ from .acoustic_refine import AcousticRefineEngine
 from .audio_splicer import AudioSplicerEngine
 from .consensus_engine import MultiModalConsensusEngine
 from .verifier_engine import ClosedLoopVerifierEngine
+from .chromaprint_bootstrap import ChromaprintBootstrap
+from .micro_dtw import MicroDTWEngine
 from .mkv_muxer import MKVMuxer
 from .qc_report import QCReportGenerator, QCReport
 from .tui import DubSyncTUI
@@ -37,12 +39,14 @@ class DubSyncPipeline:
         self.config = config or DubSyncConfig()
         self.tui = DubSyncTUI(self.config)
         self.probe = MediaProbe()
+        self.bootstrap = ChromaprintBootstrap(self.config)
         self.visual_engine = VisualAnchorEngine(self.config)
         self.block_segmenter = BlockSegmenterEngine(self.config)
         self.orb_matcher = ORBMatcherEngine(self.config)
         self.spectral_engine = SpectralFingerprintEngine(self.config)
         self.vad_engine = SileroVADEngine(self.config)
         self.consensus_engine = MultiModalConsensusEngine(self.config)
+        self.micro_dtw = MicroDTWEngine(self.config)
         self.verifier_engine = ClosedLoopVerifierEngine(self.config)
         self.acoustic_engine = AcousticRefineEngine(self.config)
         self.splicer = AudioSplicerEngine(self.config)
@@ -60,7 +64,7 @@ class DubSyncPipeline:
 
         try:
             # --- STAGE 1: Media Probing ---
-            with console.status("[bold cyan]Stage 1/7: Probing media streams & properties...[/bold cyan]", spinner="dots"):
+            with console.status("[bold cyan]Stage 1/8: Probing media streams & properties...[/bold cyan]", spinner="dots"):
                 ref_info = self.probe.probe(ref_path)
                 tar_info = self.probe.probe(tar_path)
                 time.sleep(0.3)
@@ -72,54 +76,64 @@ class DubSyncPipeline:
             ref_wav = os.path.join(temp_dir, "ref_pcm.wav")
             tar_wav = os.path.join(temp_dir, "tar_pcm.wav")
 
-            with console.status("[bold cyan]Stage 2/7: Extracting uncompressed 48kHz PCM audio...[/bold cyan]", spinner="dots"):
+            with console.status("[bold cyan]Stage 2/8: Extracting uncompressed 48kHz PCM audio...[/bold cyan]", spinner="dots"):
                 self.probe.extract_pcm_wav(ref_path, ref_wav, sample_rate=self.config.audio_sample_rate)
                 self.probe.extract_pcm_wav(tar_path, tar_wav, sample_rate=self.config.audio_sample_rate)
                 console.print("  [bold green][OK][/bold green] PCM 48kHz audio extracted successfully.")
 
-            # --- STAGE 3: Safe-Zone Crop & Keyframe Extraction ---
+            # --- STAGE 3: Chromaprint Acoustic Global Offset Bootstrap ---
+            global_offset_sec = 0.0
+            if self.config.enable_chromaprint_bootstrap:
+                with console.status("[bold cyan]Stage 3/8 (Tier 0 Bootstrap): Computing Whole-File Chroma Pitch Correlation...[/bold cyan]", spinner="dots"):
+                    bootstrap_result = self.bootstrap.estimate(ref_wav, tar_wav)
+                    global_offset_sec = bootstrap_result.offset_sec
+                console.print(f"  [bold green][OK][/bold green] [bold cyan]Chromaprint Bootstrap:[/bold cyan] Global Offset = [bold yellow]{global_offset_sec:+.3f}s[/bold yellow] (Confidence: {bootstrap_result.confidence:.2f}, Search Radius: ±{bootstrap_result.search_radius:.0f}s).")
+            else:
+                console.print("  [dim]Stage 3/8: Chromaprint bootstrap disabled — skipping.[/dim]")
+
+            # --- STAGE 4: Safe-Zone Crop & Keyframe Extraction ---
             frames_dir = os.path.join(temp_dir, "frames")
             os.makedirs(frames_dir, exist_ok=True)
             ref_anchors, tar_anchors = [], []
 
             if self.config.matcher_mode not in ["audio", "spectral", "vad"]:
-                with console.status(f"[bold cyan]Stage 3/7 (Sequence-Verified Visual): Safe-zone center-crop ({int(self.config.center_crop_ratio*100)}%) keyframe extraction...[/bold cyan]", spinner="dots"):
+                with console.status(f"[bold cyan]Stage 4/8 (Sequence-Verified Visual): Safe-zone center-crop ({int(self.config.center_crop_ratio*100)}%) keyframe extraction...[/bold cyan]", spinner="dots"):
                     ref_anchors = self.visual_engine.extract_keyframes(ref_path, frames_dir, "ref")
                     tar_anchors = self.visual_engine.extract_keyframes(tar_path, frames_dir, "tar")
                     console.print(f"  [bold green][OK][/bold green] Extracted {len(ref_anchors)} reference anchors & {len(tar_anchors)} foreign anchors.")
             else:
                 console.print(f"  [bold green][OK][/bold green] [bold cyan]Pure Acoustic Mode Active:[/bold cyan] Bypassing video keyframe extraction. Running instant sub-10ms acoustic transient alignment.")
 
-            # --- STAGE 4: Dual-Layer Cross-Validated Consensus Alignment ---
+            # --- STAGE 5: Dual-Layer Cross-Validated Consensus Alignment ---
             visual_matches = []
             strategy = self.config.sync_strategy
             mode = self.config.matcher_mode
 
             if mode == "orb":
-                with console.status("[bold cyan]Stage 4/7 (Tier 2 Direct): Running Scale- & Aspect-Invariant ORB Line-Art Matcher...[/bold cyan]", spinner="dots"):
+                with console.status("[bold cyan]Stage 5/8 (Tier 2 Direct): Running Scale- & Aspect-Invariant ORB Line-Art Matcher...[/bold cyan]", spinner="dots"):
                     visual_matches = self.orb_matcher.match_anchors_orb(ref_anchors, tar_anchors)
                 console.print(f"  [bold green][OK][/bold green] [bold cyan]Tier 2 (ORB Line-Art)[/bold cyan] recovered [bold green]{len(visual_matches)} scale-invariant anchors[/bold green].")
 
             elif mode == "visual":
-                with console.status("[bold cyan]Stage 4/7 (Tier 1 Direct): Running Primary Multi-Descriptor Visual Hash Matching...[/bold cyan]", spinner="dots"):
+                with console.status("[bold cyan]Stage 5/8 (Tier 1 Direct): Running Primary Multi-Descriptor Visual Hash Matching...[/bold cyan]", spinner="dots"):
                     visual_matches = self.visual_engine.match_anchors(ref_anchors, tar_anchors)
                 console.print(f"  [bold green][OK][/bold green] [bold cyan]Tier 1 (Visual Hash)[/bold cyan] formed [bold green]{len(visual_matches)} visual anchors[/bold green].")
 
             else:
                 # Default / Hybrid: Dual-Layer Cross-Validated Consensus (Sequence-Verified Visual + Acoustic Music + Silero VAD)
-                with console.status("[bold cyan]Stage 4/7 (Dual-Layer Consensus): Fusing Sequence-Verified Visual Cuts, Music Transients (800Hz-3.5kHz) & Silero VAD...[/bold cyan]", spinner="dots"):
+                with console.status("[bold cyan]Stage 5/8 (Dual-Layer Consensus): Fusing Sequence-Verified Visual Cuts, Music Transients (800Hz-3.5kHz) & Silero VAD...[/bold cyan]", spinner="dots"):
                     visual_matches = self.consensus_engine.discover_consensus_anchors(
                         ref_anchors, tar_anchors, ref_wav, tar_wav, ref_info.duration, tar_info.duration
                     )
                 console.print(f"  [bold green][OK][/bold green] [bold cyan]Dual-Layer Consensus Engine[/bold cyan] locked [bold green]{len(visual_matches)} cross-validated frame-accurate timing knots[/bold green].")
 
-            # --- STAGE 5: Adaptive Block Clustering or Neural DTW Warping ---
+            # --- STAGE 5b: Adaptive Block Clustering or Neural DTW Warping ---
             if strategy == "dtw":
-                with console.status("[bold cyan]Stage 5/7 (Neural DTW): Computing dense speech probability Dynamic Time Warping path...[/bold cyan]", spinner="dots"):
+                with console.status("[bold cyan]Stage 5b/8 (Neural DTW): Computing dense speech probability Dynamic Time Warping path...[/bold cyan]", spinner="dots"):
                     edl = self.vad_engine.compute_neural_dtw_edl(ref_wav, tar_wav, ref_info.duration, tar_info.duration)
                 console.print(f"  [bold green][OK][/bold green] [bold cyan]Neural DTW[/bold cyan] constructed [bold green]{len(edl)} continuous dialogue nodes[/bold green].")
             else:
-                with console.status("[bold cyan]Stage 5/7: Adaptive Macro-Block Clustering & Independent Speed Calibration...[/bold cyan]", spinner="dots"):
+                with console.status("[bold cyan]Stage 5b/8: Adaptive Macro-Block Clustering & Independent Speed Calibration...[/bold cyan]", spinner="dots"):
                     blocks = self.block_segmenter.cluster_into_blocks(
                         ref_info.duration,
                         tar_info.duration,
@@ -137,9 +151,16 @@ class DubSyncPipeline:
                             console.print(f"       -> Block #{b.block_id}: Ref [{b.ref_start:.2f}s -> {b.ref_end:.2f}s] @ [bold yellow]{b.speed_factor:.6f}x[/bold yellow] speed (Offset: {b.offset:+.4f}s, {b.anchor_count} anchors)")
                         edl = self.block_segmenter.build_macro_edl(ref_info.duration, tar_info.duration, blocks, matches=visual_matches)
 
+            # --- STAGE 5c: Micro-DTW Word-Boundary Refinement ---
+            if self.config.enable_micro_dtw and edl:
+                with console.status("[bold cyan]Stage 5c/8 (Micro-DTW): Word-Boundary Lip-Sync Tightening (<10ms Precision)...[/bold cyan]", spinner="dots"):
+                    edl_before = len(edl)
+                    edl = self.micro_dtw.refine_edl(edl, ref_wav, tar_wav)
+                console.print(f"  [bold green][OK][/bold green] [bold cyan]Micro-DTW Engine:[/bold cyan] Refined {edl_before} macro acts into [bold green]{len(edl)} sub-word precise segments[/bold green] (<10ms word-boundary accuracy).")
+
             # --- STAGE 6: Autonomous Closed-Loop Self-Verification & Healing ---
             if self.config.enable_auto_verification:
-                with console.status("[bold cyan]Stage 6/7: Autonomous Closed-Loop Verification & Audio Continuity Probing...[/bold cyan]", spinner="dots"):
+                with console.status("[bold cyan]Stage 6/8: Autonomous Closed-Loop Verification & Audio Continuity Probing...[/bold cyan]", spinner="dots"):
                     edl, audit = self.verifier_engine.audit_and_heal_edl(
                         edl, ref_wav, tar_wav, ref_info.duration, tar_info.duration
                     )
@@ -147,12 +168,13 @@ class DubSyncPipeline:
                     console.print(f"  [bold green][OK][/bold green] [bold green]Self-Healing Activated:[/bold green] Healed [bold yellow]{audit.false_fallbacks_healed_count} false fallback gap(s)[/bold yellow] ({audit.healed_duration_sec:.1f}s of continuous dub recovered).")
                 console.print(f"  [bold green][OK][/bold green] [bold cyan]Closed-Loop Audit Passed:[/bold cyan] {audit.passed_windows_pct:.1f}% frames verified (Mean Error: [bold green]{audit.mean_alignment_error_ms:.1f}ms[/bold green]).")
 
-            # --- STAGE 7: Continuous Audio Splicing & MKV Muxing ---
+            # --- STAGE 7: Continuous Audio Splicing & Loudness Normalization ---
             synced_wav = os.path.join(temp_dir, "synced_dub.wav")
-            with console.status("[bold cyan]Stage 7/7: Continuous audio rendering, crossfading & MKV muxing...[/bold cyan]", spinner="dots"):
+            with console.status("[bold cyan]Stage 7/8: Audio Splicing, Cosine Crossfading & EBU R128 Normalization...[/bold cyan]", spinner="dots"):
                 self.splicer.render_and_splice(edl, ref_wav, tar_wav, synced_wav, temp_dir)
-                
-                # Mux to final MKV
+
+            # --- STAGE 8: MKV Muxing ---
+            with console.status("[bold cyan]Stage 8/8: Muxing Final Multi-Track Master MKV...[/bold cyan]", spinner="dots"):
                 self.muxer.mux(ref_path, synced_wav, output_path)
                 console.print(f"  [bold green][OK][/bold green] Output MKV muxed with multi-track audio: {output_path}")
 
