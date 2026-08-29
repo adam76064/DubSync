@@ -1,0 +1,10 @@
+# Development / test-only dependencies.
+# Install with:  pip install -r requirements.txt -r requirements-dev.txt
+
+# Test runner
+pytest>=7.0.0
+
+# Provides an FFmpeg binary when none is on PATH, so the suite can run in CI
+# containers. dub_sync_engine.media_probe already prefers a system ffmpeg and
+# falls back to this automatically.
+imageio-ffmpeg>=0.4.9

@@ -81,3 +81,7 @@ Thumbs.db
 *.key
 *.pem
 *.token
+
+# Test harness scratch output
+tests/_media/
+tests/_results/
