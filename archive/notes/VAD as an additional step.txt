@@ -1,8 +1,0 @@
-https://github.com/snakers4/silero-vad
-https://paths.grasp.study/modules/1b40eb1a-c30b-4c28-916d-5a80a70b7606/lessons/013291d0-d8ba-415c-9538-0e4209fe7018
-https://ai-coustics.com/glossary/voice-activity-detection-vad
-
-https://www.google.com/search?q=Silero+VAD+sys+reqs&newwindow=1&sca_esv=13ae6c4d14f331ab&rlz=1C1HKFL_arEG1220EG1220&sxsrf=APpeQnuW3dxMA_v8e_0fEGsqzm8Bnmdhyg%3A1787926481468&ei=0ZeRauybHLeykdUPiMulwQ0&biw=731&bih=493&ved=0ahUKEwisyL-WwcOWAxU3WaQEHYhlKdgQ4dUDCBA&uact=5&oq=Silero+VAD+sys+reqs&gs_lp=Egxnd3Mtd2l6LXNlcnAiE1NpbGVybyBWQUQgc3lzIHJlcXMyChAAGEcY1gQYsAMyChAAGEcY1gQYsAMyChAAGEcY1gQYsAMyChAAGEcY1gQYsAMyChAAGEcY1gQYsAMyChAAGEcY1gQYsAMyChAAGEcY1gQYsAMyChAAGEcY1gQYsAMyDRAAGIAEGIoFGEMYsAMyFxAuGNwGGLgGGNoGGNgCGMgDGLAD2AEBMhcQLhjcBhi4BhjaBhjYAhjIAxiwA9gBAUi3DlBXWKwNcAF4AZABAJgBAKABAKoBALgBA8gBAPgBAZgCAaACGZgDAIgGAZAGC7oGBAgBGBmSBwExoAcAsgcAuAcAwgcDNC0xyAcUgAgB&sclient=gws-wiz-serp
-
-WebRTC VAD
-https://www.google.com/search?q=WebRTC+VAD&rlz=1C1HKFL_arEG1220EG1220&sourceid=chrome&ie=UTF-8&source=chrome.ctxt
