@@ -46,15 +46,24 @@ report:
 
 It then prints what the tool's own audit claimed, so the two can be compared directly.
 
-### Baseline (commit `f84fdcc`)
+### Baseline
 
-| Strategy | Duration error | Mean abs. error | Max error | Windows within ±120 ms |
-|:--|--:|--:|--:|--:|
-| `--matcher visual` | +32 ms | 466 ms | 5 980 ms | 89.7 % |
-| **default** (`auto`/`hybrid`) | +32 ms | 3 133 ms | 7 040 ms | 3.4 % |
-| `--strategy dtw` | −96 ms | 4 003 ms | 7 820 ms | 0.0 % |
+`f84fdcc` (as first reviewed) — every run reported `99.2% frames verified (Mean Error: 24.5ms)`:
 
-All three report `99.2% frames verified (Mean Error: 24.5ms)`.
+| Strategy | Mean abs. error | Windows within ±120 ms |
+|:--|--:|--:|
+| `--matcher visual` | 466 ms | 89.7 % |
+| default (`auto`/`hybrid`) | 3 133 ms | 3.4 % |
+| `--strategy dtw` | 4 003 ms | 0.0 % |
+
+Current branch, after the F1/F2/F5 fixes (the audit now measures, and agrees with this checker
+to within ~1 point of coverage):
+
+| Strategy | Anchors | Omission placed at (truth 24–30 s) | Self-reported | Independent |
+|:--|--:|:--|--:|--:|
+| `--matcher visual` | 4 | 30.03–36.0 ❌ | 1 466 ms / 76.7 % | 403 ms / 85.7 % |
+| default (`auto`/`hybrid`) | 11 | 23.99–30.0 ✅ | 204 ms / 88.1 % | 558 ms / 89.3 % |
+| `--strategy dtw` | 11 | not detected ❌ | 3 189 ms / 29.4 % | 1 880 ms / 3.6 % |
 
 ## Known-defect specs
 

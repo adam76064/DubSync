@@ -127,10 +127,10 @@ accurate, self-auditing" behaviour is not what a user gets today.
 | # | Finding | Severity |
 |:--|:--------|:---------|
 | F1 | Closed-loop audit metrics are hard-coded constants, not measurements | 🔴 Critical → **✅ fixed** |
-| F2 | Default (`auto`/`hybrid`) path collapses to 1 anchor → seconds-scale error | 🔴 Critical |
-| F3 | Omitted-scene gaps are always placed at the *end* of an anchor interval | 🟠 High |
+| F2 | Default (`auto`/`hybrid`) path collapses to 1 anchor → seconds-scale error | 🔴 Critical → **✅ fixed** |
+| F3 | Omitted-scene gaps are always placed at the *end* of an anchor interval | 🟠 High → **🟡 mitigated** (see §9) |
 | F4 | `AcousticRefineEngine` / `SpectralFingerprintEngine` are constructed but never called | 🟠 High |
-| F5 | README documents a CLI that does not exist; every documented command fails | 🟠 High |
+| F5 | README documents a CLI that does not exist; every documented command fails | 🟠 High → **✅ fixed** |
 | F6 | Zero-crossing snapping & cosine crossfades are dead code; segments are hard-cut | 🟡 Medium |
 | F7 | `AudioSplicerEngine.build_edl` references a non-existent config field | 🟡 Medium → **✅ fixed** (by upstream) |
 | F8 | No tests, no CI, no packaging, no LICENSE; five different version strings | 🟡 Medium |
@@ -523,3 +523,93 @@ The audit now ranks the strategies honestly — previously all three reported `2
 > the *EDL plan*. They differ because per-segment `atempo` + `-t` truncation makes the render drift
 > slightly from the plan, partly masking planning errors. Both are legitimate; the EDL-level figure
 > is the one that answers "is the plan right".
+
+---
+
+## 9. Fix log — F2 (consensus collapse), and an unexpected F3 payoff
+
+**Status: fixed.** The default `auto`/`hybrid` matcher locked **1** anchor where the plain visual
+tier locked 4, and was ~14× less accurate. Three defects compounded:
+
+1. `consensus_engine.py:51` read `config.fps_ratio`, which `DubSyncConfig` never defined, so the
+   `hasattr()` guard was **always false** and the global speed was hard-coded to `0.96`. The
+   acoustic tiers then resampled the dub by the wrong factor (true value on the fixture: `1.041667`),
+   smearing every correlation below its acceptance threshold.
+2. The confidence formula divided by a magic `12` while `max_hash_dist` is `14`, so any match at
+   distance ≥ 12 scored exactly `0.0` and achievable confidence capped near `0.49`
+   (observed: 0.488, 0.0, 0.200, 0.331).
+3. The fusion gate then demanded `confidence >= 0.90` — unreachable given (2). The visual tier was
+   silently discarded from the "multi-modal" fusion, leaving one degenerate anchor at `t=0` and a
+   single dub segment stretched across the whole film.
+
+**Fixes**
+
+* Run the visual tier **first** (it needs no speed estimate) and measure the global slope from its
+  anchors with the existing `calibrate_global_slope`; fall back to the probed frame-rate ratio, then
+  to 1:1. *Measured beats nominal*: the fixture's file tags say 24/25 = 0.96 while its content is
+  actually 1.0417×, so a tag-derived estimate would have been wrong here.
+* Scale visual confidence by `max_hash_dist` so it spans [0, 1] over the range actually admitted.
+* **Fuse** the visual chain instead of gating it — it already survived a monotonic DP lattice with
+  physical speed constraints, so acoustic agreement is now a 1.3× score bonus, not a veto.
+
+**Result** (measured by the new audit, confirmed independently by `tests/verify_output.py`):
+
+| | anchors | self-reported mean / within 50 ms | independent mean / within 120 ms |
+|:--|--:|--:|--:|
+| before | 1 | 3 306 ms / 25.5 % | 1 969 ms / 39.3 % |
+| after | **11** | **204 ms / 88.1 %** | **558 ms / 89.3 %** |
+
+The tool's own audit and the independent ground-truth measurement now agree to within 1.2 points on
+coverage — the first time they ever have.
+
+> **Unexpected payoff for F3.** With 11 anchors instead of 1, the omitted scene is now placed
+> correctly: the bridge lands at **ref[23.99, 30.0]** against a ground truth of **[24, 30]**, and the
+> independent checker reports **0 region mismatches**. With only the 4 sparse scene-cut anchors the
+> tool still bridges `[30.03, 36.0]` — the start-vs-end ambiguity is real, but it disappears once
+> the timeline is anchored densely enough to localise the gap. F3 is therefore mitigated in the
+> default path rather than fixed in `block_segmenter`; the `xfail` spec stays, because with sparse
+> anchors the ambiguity is unresolved.
+
+### Current measured baseline (this branch)
+
+| Strategy | Anchors | Omission placed at (truth 24–30 s) | Self-reported | Independent | Region mismatches |
+|:--|--:|:--|--:|--:|--:|
+| `--matcher visual` | 4 | 30.03–36.0 ❌ | 1 466 ms / 76.7 % | 403 ms / 85.7 % | 2 |
+| **default (`auto`/`hybrid`)** | 11 | **23.99–30.0 ✅** | **204 ms / 88.1 %** | **558 ms / 89.3 %** | **0** |
+| `--strategy dtw` | 11 | not detected ❌ | 3 189 ms / 29.4 % | 1 880 ms / 3.6 % | 1 |
+
+`--strategy dtw` is now clearly the weak path and deserves its own investigation (its Sakoe-Chiba
+band is centred on the *linear* diagonal, so a 6 s omission drifts out of band).
+
+---
+
+## 10. Fix log — F5 (CLI/README)
+
+**Status: fixed.** Every documented command used to fail argparse. The CLI now accepts the
+documented surface while keeping the positional form working: `--ref`/`--tar`/`--out`,
+`--matcher-mode` (alias of `--matcher`, and `hybrid`/`audio` are now valid choices that route to the
+consensus path the pipeline already used for them), `--fallback-mode`, `--preset studio_ultra`, and
+`--report`/`--no-report` (previously reports were always written; now gated by
+`config.enable_reports`).
+
+The README was corrected to match, and now documents the flags that existed but were undocumented
+(`--scene_threshold`, `--ref_lang`/`--tar_lang`, `--interactive`) plus a "Verifying a sync" section.
+The headline claim of "sub-frame accuracy (0.000ms drift)" was replaced with what the tool now does:
+measure and report a mean/peak error per run, or say `NOT MEASURED`.
+
+---
+
+## 11. Remaining work
+
+| # | Finding | Status |
+|:--|:--------|:-------|
+| F3 | Cut placement ambiguous with sparse anchors; `dtw` misses omissions | 🟡 mitigated, not fixed |
+| F4 | `AcousticRefineEngine` / `SpectralFingerprintEngine` / `discover_speech_anchors` never called | 🟠 open |
+| F6 | Segments hard-concatenated; no crossfade; `zero_crossing_snap` a no-op | 🟡 open |
+| F8 | No packaging / LICENSE / single source of truth for the version | 🟡 open |
+| F9 | Import-time FFmpeg lookup; ~2 GB of scratch per feature, never cleaned by default | 🟡 open |
+| F10 | Dead config knobs; ffmpeg-stderr scraping instead of `ffprobe -print_format json` | 🔵 open |
+| F12 | Duration drift (−75 to −416 ms); per-block speed calibration discarded by `build_macro_edl` | 🔵 open |
+| F13 | Bare `except Exception: pass` around whole layers in `consensus_engine` | 🔵 open |
+| — | `dtw` strategy: band centred on the linear diagonal, omissions drift out of band | 🟠 newly identified |
+| — | Chromaprint bootstrap result computed and printed but never used; confidence saturates at 1.00 | 🟡 newly identified |
