@@ -1,0 +1,83 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# Large media files and video/audio formats
+*.mkv
+*.mp4
+*.avi
+*.mov
+*.webm
+*.flv
+*.ts
+*.m2ts
+*.wav
+*.mp3
+*.aac
+*.flac
+*.m4a
+*.ogg
+*.opus
+*.ac3
+*.eac3
+*.dts
+
+# Test files and sample directories
+test_files/
+sample_files/
+media/
+videos/
+
+# Temporary directories, debug artifacts, and logs
+*_temp_debug/
+*_temp_*/
+*Synced*
+*.log
+*.tmp
+*.zip
+*.tar.gz
+scratch/
+.system_generated/
+
+# OS and IDE files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment variables & secrets
+.env
+.env.*
+*.key
+*.pem
+*.token

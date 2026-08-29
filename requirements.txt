@@ -1,0 +1,14 @@
+# Core Numerical & Signal Processing
+numpy>=1.22.0
+scipy>=1.9.0
+
+# Computer Vision & Keyframe Perceptual Hashing
+opencv-python>=4.6.0
+Pillow>=9.0.0
+imagehash>=4.3.0
+
+# Neural Voice Activity Detection (Silero ONNX runtime)
+onnxruntime>=1.14.0
+
+# Modern Terminal UI & Diagnostic Visuals
+rich>=12.0.0
