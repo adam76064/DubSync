@@ -219,7 +219,7 @@ class DubSyncPipeline:
                     "tar_time": round(m.tar_time, 3),
                     "offset": round(m.offset, 4),
                     "confidence": round(m.confidence, 3),
-                    "metrics": f"hash_dist={m.hash_dist}"
+                    "metrics": f"hash_dist={m.hash_dist} seq_len={m.seq_len}"
                 }
                 for m in visual_matches
             ]

@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import List, Dict, Any, Tuple, Optional
 
 from .config import DubSyncConfig
-from .audio_splicer import SegmentEDL
+from .audio_splicer import SegmentEDL, sanitize_edl
 
 
 @dataclass
@@ -106,7 +106,8 @@ class ClosedLoopVerifierEngine:
             return None
 
         pad = int(search_ms / 1000.0 * sr2)
-        ti = max(0, int(t0 * sr2) - pad)
+        t0_sample = int(t0 * sr2)
+        ti = max(0, t0_sample - pad)
         tj = min(len(tar_env), int(t1 * sr2) + pad)
         if tj <= ti:
             return None
@@ -132,7 +133,9 @@ class ClosedLoopVerifierEngine:
         corr_norm = corr / np.maximum(denom, 1e-8)
 
         peak = int(np.argmax(corr_norm))
-        lag = peak - pad  # zero lag == aligned
+        # lag (samples) relative to the *expected* target position t0, robust to the
+        # search window being clamped at the file boundaries.
+        lag = peak - (t0_sample - ti)
         return lag, float(corr_norm[peak])
 
     # ------------------------------------------------------------------ #
@@ -266,19 +269,8 @@ class ClosedLoopVerifierEngine:
                     "correlation": round(peak, 4),
                 })
 
-        # --- Pass 3: merge adjacent dub segments with matching speed ---
-        compact_edl: List[SegmentEDL] = []
-        for s in healed_edl:
-            if compact_edl and compact_edl[-1].segment_type == s.segment_type == "dub":
-                prev = compact_edl[-1]
-                if abs(prev.speed_factor - s.speed_factor) < 0.003 and abs(prev.tar_end - s.tar_start) < 0.2:
-                    prev.ref_end = s.ref_end
-                    prev.tar_end = s.tar_end
-                    continue
-            compact_edl.append(s)
-
-        for idx, s in enumerate(compact_edl):
-            s.seg_id = idx
+        # --- Pass 3: sanitize (micro-fallback absorption, min-dub-act, contiguity merge) ---
+        compact_edl = sanitize_edl(healed_edl, self.config)
 
         if errors_ms:
             abs_errors = np.abs(np.array(errors_ms, dtype=np.float32))
@@ -299,3 +291,112 @@ class ClosedLoopVerifierEngine:
         )
 
         return compact_edl, audit
+
+    # ------------------------------------------------------------------ #
+    # Standalone drift profiling (for `--qc` — no re-render)
+    # ------------------------------------------------------------------ #
+    # Candidate broadcast speed ratios (target timeline length / reference
+    # timeline length). PAL 25fps->24fps is ~0.96, NTSC pull-up ~1.001, etc.
+    CANDIDATE_SPEED_RATIOS: Tuple[float, ...] = (
+        0.90, 0.92, 0.94, 0.95, 0.96, 0.97, 0.98, 0.99,
+        1.0, 1.001, 1.01, 1.02, 1.03, 1.04, 1.05, 1.06, 1.08, 1.10,
+    )
+
+    def measure_drift_profile(
+        self,
+        ref_wav_path: str,
+        tar_wav_path: str,
+        window_sec: float = 30.0,
+        hop_sec: float = 20.0,
+        search_sec: float = 20.0,
+    ) -> List[Dict[str, Any]]:
+        """
+        Measure the alignment offset (and its drift over time) between the reference
+        and target M&E envelopes, without building an EDL or rendering anything.
+
+        Broadcast-speed mismatches are handled by first estimating the global speed
+        ratio (target/ref) over a coarse grid of known standards, resampling the
+        target to the reference timescale, and only then measuring per-window
+        residual offsets (whose slope is the residual drift, ~0 when speed-locked).
+
+        Returns a list of probe records:
+            {ref_time, tar_time, offset, correlation, speed_ratio}.
+        """
+        sr_r, audio_r = wavfile.read(ref_wav_path)
+        sr_t, audio_t = wavfile.read(tar_wav_path)
+        audio_r = self._to_mono_float(audio_r)
+        audio_t = self._to_mono_float(audio_t)
+
+        ref_env, sr_r2 = self._me_envelope(audio_r, sr_r)
+        tar_env, sr_t2 = self._me_envelope(audio_t, sr_t)
+        if sr_r2 != sr_t2:
+            common = max(sr_r2, sr_t2)
+            if sr_r2 != common:
+                ref_env = scipy.signal.resample(ref_env, int(len(ref_env) * common / sr_r2))
+            if sr_t2 != common:
+                tar_env = scipy.signal.resample(tar_env, int(len(tar_env) * common / sr_t2))
+            sr2 = common
+        else:
+            sr2 = sr_r2
+
+        ref_dur = len(ref_env) / float(sr2)
+        tar_dur = len(tar_env) / float(sr2)
+        if ref_dur < window_sec or tar_dur < window_sec:
+            return []
+
+        # --- Step 1: estimate the global speed ratio by correlating a central ---
+        # reference window against the target resampled at each candidate ratio.
+        c0 = ref_dur * 0.30
+        c1 = min(c0 + window_sec, ref_dur - 1.0)
+        if c1 <= c0:
+            c0, c1 = 0.0, min(window_sec, ref_dur)
+        wi, wj = int(c0 * sr2), int(c1 * sr2)
+        ref_win = ref_env[wi:wj]
+        r_norm = np.linalg.norm(ref_win)
+        if r_norm < 1e-4:
+            return []
+
+        best_ratio, best_corr = 1.0, -1.0
+        for ratio in self.CANDIDATE_SPEED_RATIOS:
+            # Resample the target to the reference timescale for this ratio.
+            tar_n = int(len(tar_env) * ratio)
+            if tar_n < len(ref_win):
+                continue
+            tar_scaled = scipy.signal.resample(tar_env, tar_n).astype(np.float32)
+            corr = scipy.signal.correlate(tar_scaled, ref_win, mode="valid")
+            # Normalize by the sliding target-window energy.
+            tar_sq = tar_scaled ** 2
+            cum = np.concatenate(([0.0], np.cumsum(tar_sq)))
+            L = len(ref_win)
+            norms = np.sqrt(np.maximum(cum[L:] - cum[:-L], 0.0))
+            corr_n = corr / np.maximum(r_norm * norms, 1e-8)
+            peak = float(np.max(corr_n))
+            if peak > best_corr:
+                best_corr, best_ratio = peak, ratio
+
+        # --- Step 2: resample target to the reference timescale at best ratio ---
+        tar_aligned = scipy.signal.resample(
+            tar_env, int(len(tar_env) * best_ratio)
+        ).astype(np.float32)
+
+        # --- Step 3: per-window residual offset (slope = residual drift) ---
+        results: List[Dict[str, Any]] = []
+        for t_ref in np.arange(0.0, ref_dur - window_sec, hop_sec):
+            t1 = t_ref + window_sec
+            res = self._normalized_correlation(
+                ref_env, tar_aligned, sr2, t_ref, t1, t_ref, t1,
+                search_ms=search_sec * 1000.0,
+            )
+            if res is None:
+                continue
+            lag, peak = res
+            tar_time = t_ref + (lag / sr2)
+            results.append({
+                "ref_time": round(t_ref, 2),
+                "tar_time": round(tar_time, 3),
+                "offset": round(tar_time - t_ref, 4),
+                "correlation": round(peak, 4),
+                "speed_ratio": round(best_ratio, 5),
+            })
+
+        return results

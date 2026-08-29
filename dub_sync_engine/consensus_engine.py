@@ -95,7 +95,7 @@ class MultiModalConsensusEngine:
                 t_norm = np.linalg.norm(t_slice)
                 peak = corr[best_lag] / (r_norm * t_norm + 1e-8)
 
-                if peak >= 0.40 and tar_actual_t > 0:
+                if peak >= self.config.min_acoustic_peak and tar_actual_t > 0:
                     candidates.append({
                         "ref_time": float(sec),
                         "tar_time": float(tar_actual_t),
@@ -139,7 +139,7 @@ class MultiModalConsensusEngine:
                 t_norm = np.linalg.norm(t_win[best_lag : best_lag + win_frames])
                 norm_peak = corr[best_lag] / (r_norm * t_norm + 1e-8)
 
-                if norm_peak >= 0.48:
+                if norm_peak >= self.config.min_vad_peak:
                     tar_f = s_start + best_lag
                     t_tar = tar_f * dt_vad
                     offset = t_tar - t_ref
@@ -163,9 +163,13 @@ class MultiModalConsensusEngine:
             med_offset = float(np.median(acoustic_offsets)) if acoustic_offsets else None
 
             for m in raw_visual_matches:
-                # Check if this visual anchor is confirmed by an acoustic anchor within +/-4.0s with consistent offset
+                # A visual match is accepted only if confirmed by an acoustic anchor
+                # within a tight window with a consistent offset. No confidence bypass:
+                # an isolated frame match with no acoustic support is always rejected.
+                win = self.config.acoustic_gate_window_sec
+                off = self.config.acoustic_gate_offset_sec
                 is_acoustically_confirmed = any(
-                    abs(m.ref_time - c["ref_time"]) <= 4.0 and abs(m.offset - c["offset"]) <= 2.0
+                    abs(m.ref_time - c["ref_time"]) <= win and abs(m.offset - c["offset"]) <= off
                     for c in candidates if c["source"] in ["acoustic_music", "vad_speech"]
                 )
 

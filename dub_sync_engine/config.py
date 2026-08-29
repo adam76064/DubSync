@@ -7,6 +7,34 @@ from enum import Enum
 from typing import Optional, List
 
 
+# Standard broadcast playback speed ratios. A continuous act of a TV episode runs at
+# one of these hardware clock speeds — never an arbitrary value (which causes drift).
+BROADCAST_STANDARDS = (
+    1.0,            # Film / native speed
+    24.0 / 25.0,    # 0.960000  (PAL slowdown: 25fps -> 24fps)
+    25.0 / 24.0,    # 1.041667  (PAL speedup: 24fps -> 25fps)
+    24.0 / 23.976,  # 1.001001  (NTSC film pulldown)
+    23.976 / 24.0,  # 0.999000  (film slowdown)
+)
+
+
+def snap_to_broadcast_speed(raw: float, tol: float = 0.004) -> float:
+    """
+    Snap a measured speed ratio to the nearest broadcast standard within ``tol``.
+    Falls back to a clamped raw value when no standard matches (defensive — should
+    be rare for well-formed continuous acts).
+
+    The tolerance is tight enough to distinguish the "big" standards (1.0 film,
+    0.96 PAL, 1.041667 PAL-speedup, which are ~4% apart) while folding the
+    near-unity NTSC pulldown (1.001001) and film slowdown (0.999) into 1.0 —
+    matching the historical engine behavior.
+    """
+    for std in BROADCAST_STANDARDS:
+        if abs(raw - std) <= tol:
+            return round(std, 6)
+    return max(0.90, min(1.10, raw))
+
+
 class FallbackMode(Enum):
     VOCAL_FILTERED = "vocal_filtered"  # English audio with speech attenuated (keeps music/SFX)
     FULL_REFERENCE = "full_reference"  # Raw English audio fallback
@@ -57,7 +85,16 @@ class DubSyncConfig:
     crossfade_duration_ms: float = 10.0# Equal-power cosine crossfade duration in ms
     max_speed_deformation: float = 0.05# Maximum allowable speed stretch per continuous scene (5%)
     min_scene_duration_sec: float = 0.20 # Minimum scene span (s) to retain as a distinct EDL segment
+    strict_speed: bool = True         # Lock continuous-act speed to broadcast standards (no floating)
     fallback_mode: FallbackMode = FallbackMode.VOCAL_FILTERED
+
+    # --- Acoustic Gate & Micro-Chopping Guards ---
+    min_acoustic_peak: float = 0.50   # Min normalized M&E correlation peak to accept an acoustic anchor
+    min_vad_peak: float = 0.55        # Min normalized speech-probability correlation to accept a VAD anchor
+    min_dub_act_sec: float = 5.0      # A dub fragment shorter than this (between fallbacks) is ambient noise
+    micro_fallback_merge_sec: float = 0.5  # Merge fallback gaps shorter than this into the neighboring dub
+    acoustic_gate_window_sec: float = 4.0  # +/- window (s) around an acoustic anchor for visual confirmation
+    acoustic_gate_offset_sec: float = 2.0  # Max allowed |delta offset| between visual & acoustic anchors
     
     # --- Output Codec & Container ---
     audio_codec: str = "aac"

@@ -38,6 +38,7 @@ class AnchorMatch:
     hash_dist: int
     confidence: float
     offset: float  # tar_time - ref_time
+    seq_len: int = 1  # number of consecutive cut matches verified (N-gram rhythm)
 
 
 class VisualAnchorEngine:
@@ -196,6 +197,11 @@ class VisualAnchorEngine:
                                         score += (10.0 - c_k) * 1.5
 
                     if seq_len >= 2:
+                        confidence = min(1.0, confidence + 0.10)
+                        score += 6.0 * (seq_len - 1)
+                    if seq_len >= 3:
+                        # A chain of 3 consecutive camera cuts is virtually unique in
+                        # animation — grant a strong confidence boost.
                         confidence = min(1.0, confidence + 0.20)
                         score += 15.0 * (seq_len - 1)
 
@@ -265,7 +271,8 @@ class VisualAnchorEngine:
                 tar_time=c["tar_time"],
                 hash_dist=c["hash_dist"],
                 confidence=round(c["confidence"], 3),
-                offset=round(c["offset"], 4)
+                offset=round(c["offset"], 4),
+                seq_len=c["seq_len"]
             )
             chain.append(match)
             curr = parent[curr]

@@ -11,6 +11,83 @@ from .pipeline import DubSyncPipeline
 from .tui import DubSyncTUI
 
 
+def _run_qc(ref_path: str, tar_path: str, config: DubSyncConfig) -> None:
+    """Measure the alignment drift profile between two media files (no re-render)."""
+    import json
+    import tempfile
+
+    from .media_probe import MediaProbe
+    from .verifier_engine import ClosedLoopVerifierEngine
+    from rich.console import Console
+    from rich.table import Table
+
+    console = Console(highlight=False)
+    probe = MediaProbe()
+
+    with console.status("QC: extracting 48kHz PCM audio..."):
+        tmp = tempfile.mkdtemp()
+        ref_wav = os.path.join(tmp, "ref.wav")
+        tar_wav = os.path.join(tmp, "tar.wav")
+        ref_info = probe.probe(ref_path)
+        tar_info = probe.probe(tar_path)
+        probe.extract_pcm_wav(ref_path, ref_wav, sample_rate=config.audio_sample_rate,
+                              stream_index=probe.select_audio_stream(ref_info, config.ref_lang))
+        probe.extract_pcm_wav(tar_path, tar_wav, sample_rate=config.audio_sample_rate,
+                              stream_index=probe.select_audio_stream(tar_info, config.tar_lang))
+
+    with console.status("QC: measuring drift profile..."):
+        verifier = ClosedLoopVerifierEngine(config)
+        profile = verifier.measure_drift_profile(ref_wav, tar_wav)
+
+    if not profile:
+        console.print("[red]QC: no alignable windows found.[/red]")
+        return
+
+    offsets = [p["offset"] for p in profile]
+    corrs = [p["correlation"] for p in profile]
+    ref_times = [p["ref_time"] for p in profile]
+
+    # Linear drift estimate: slope of offset vs ref_time (sec/sec).
+    if len(profile) >= 2:
+        import numpy as np
+        slope, intercept = np.polyfit(ref_times, offsets, 1)
+    else:
+        slope, intercept = 0.0, offsets[0]
+
+    table = Table(title="DubSync QC — Alignment Drift Profile", show_header=True)
+    table.add_column("Ref Time", justify="right")
+    table.add_column("Tar Time", justify="right")
+    table.add_column("Offset (s)", justify="right")
+    table.add_column("Corr", justify="right")
+    for p in profile:
+        table.add_row(f"{p['ref_time']:.1f}s", f"{p['tar_time']:.2f}s",
+                      f"{p['offset']:+.3f}", f"{p['correlation']:.2f}")
+    console.print(table)
+
+    console.print()
+    console.print(f"[bold]Global offset:[/bold] {intercept:+.3f}s   "
+                  f"[bold]Drift slope:[/bold] {slope:+.5f}s/s "
+                  f"({slope * 3600:+.1f}s/hour)   "
+                  f"[bold]Mean corr:[/bold] {sum(corrs)/max(1, len(corrs)):.3f}")
+    console.print(f"[dim]A near-zero drift slope means the pair is speed-locked; "
+                  f"a large |slope| indicates a broadcast-speed (PAL/NTSC) mismatch.[/dim]")
+
+    # Save JSON QC report alongside the reference.
+    out_json = os.path.splitext(ref_path)[0] + "_qc_report.json"
+    with open(out_json, "w", encoding="utf-8") as f:
+        json.dump({
+            "ref_file": os.path.basename(ref_path),
+            "tar_file": os.path.basename(tar_path),
+            "ref_duration_sec": ref_info.duration,
+            "tar_duration_sec": tar_info.duration,
+            "global_offset_sec": round(intercept, 4),
+            "drift_slope_sec_per_sec": round(float(slope), 6),
+            "mean_correlation": round(sum(corrs) / max(1, len(corrs)), 4),
+            "probe_windows": profile,
+        }, f, indent=2)
+    console.print(f"\n[green]QC report saved:[/green] {out_json}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="DubSync Pro: Studio-Grade Cartoon & Anime Dub Audio Synchronizer",
@@ -39,6 +116,12 @@ def main():
     parser.add_argument("--no-report", dest="report", action="store_false",
                         help="Disable forensic diagnostic report generation")
     parser.add_argument("--interactive", "-i", action="store_true", help="Force interactive TUI setup mode")
+    parser.add_argument("--strict-speed", dest="strict_speed", action="store_true", default=True,
+                        help="Lock continuous-act speed to broadcast standards (default on)")
+    parser.add_argument("--no-strict-speed", dest="strict_speed", action="store_false",
+                        help="Allow continuous-act speed to float between 0.90x and 1.10x")
+    parser.add_argument("--qc", action="store_true",
+                        help="Measure the alignment drift profile between ref and tar without re-rendering")
 
     args = parser.parse_args()
 
@@ -65,6 +148,7 @@ def main():
         config.fallback_mode = FallbackMode.SILENCE
 
     config.sync_strategy = args.strategy
+    config.strict_speed = args.strict_speed
 
     tui = DubSyncTUI(config)
 
@@ -75,6 +159,11 @@ def main():
         ref_path = args.ref_video
         tar_path = args.foreign_video
         out_path = args.output_video or (os.path.splitext(ref_path)[0] + "_Synced.mkv")
+
+    # QC mode: measure drift only, no rendering / muxing.
+    if args.qc:
+        _run_qc(ref_path, tar_path, config)
+        return
 
     # Execute pipeline
     pipeline = DubSyncPipeline(config)

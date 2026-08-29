@@ -11,7 +11,7 @@ from typing import List, Dict, Optional, Tuple
 import numpy as np
 import scipy.io.wavfile as wavfile
 
-from .config import DubSyncConfig, FallbackMode
+from .config import DubSyncConfig, FallbackMode, snap_to_broadcast_speed
 from .acoustic_refine import RefinedAnchor
 from .media_probe import FFMPEG_PATH, run_ffmpeg_cmd
 
@@ -34,6 +34,106 @@ class SegmentEDL:
     @property
     def tar_duration(self) -> float:
         return self.tar_end - self.tar_start
+
+
+def sanitize_edl(edl: List["SegmentEDL"], config: DubSyncConfig) -> List["SegmentEDL"]:
+    """
+    Post-process an EDL to remove the artifacts the history identified:
+
+    1. Reclassify tiny dub fragments sandwiched between fallbacks as fallback
+       (ambient noise inside a real cut → don't emit a 1.7s Arabic "blip").
+    2. Merge adjacent fallback segments into a single clean bridge.
+    3. Absorb micro-fallbacks (< micro_fallback_merge_sec) whose target audio is
+       actually contiguous (a false cut) — dropping them lets the surrounding dub
+       segments merge back into one continuous act.
+    4. Merge adjacent dub segments that share a speed and are target-contiguous.
+
+    Returns a new, re-indexed list (input is not mutated).
+    """
+    if not edl:
+        return edl
+
+    segs = list(edl)
+
+    # 1. Tiny dub fragments between fallbacks -> fallback (ambient noise in a cut).
+    for i, seg in enumerate(segs):
+        if seg.segment_type != "dub":
+            continue
+        if seg.ref_duration >= config.min_dub_act_sec:
+            continue
+        prev_fb = i > 0 and segs[i - 1].segment_type == "fallback"
+        next_fb = i < len(segs) - 1 and segs[i + 1].segment_type == "fallback"
+        if prev_fb or next_fb:
+            segs[i] = SegmentEDL(
+                seg.seg_id, "fallback",
+                seg.ref_start, seg.ref_end,
+                seg.tar_start, seg.tar_end,
+                1.0, seg.confidence,
+            )
+
+    # 2. Merge adjacent fallbacks.
+    merged: List[SegmentEDL] = []
+    for seg in segs:
+        if merged and merged[-1].segment_type == seg.segment_type == "fallback":
+            prev = merged[-1]
+            if abs(prev.ref_end - seg.ref_start) <= 0.05:
+                prev.ref_end = seg.ref_end
+                continue
+        merged.append(seg)
+    segs = merged
+
+    # 3. Absorb micro-fallbacks with contiguous target audio (false cuts) by merging
+    #    the surrounding dub segments directly across the gap.
+    keep: List[SegmentEDL] = []
+    i = 0
+    while i < len(segs):
+        seg = segs[i]
+        if (
+            seg.segment_type == "fallback"
+            and seg.ref_duration < config.micro_fallback_merge_sec
+            and 0 < i < len(segs) - 1
+            and keep
+        ):
+            prev = segs[i - 1]
+            nxt = segs[i + 1]
+            if (
+                prev.segment_type == "dub"
+                and nxt.segment_type == "dub"
+                and abs(prev.tar_end - nxt.tar_start) < 0.2
+            ):
+                # Target audio is continuous across the gap -> a false cut. Merge
+                # prev + next into one continuous dub spanning the fallback.
+                keep[-1] = SegmentEDL(
+                    prev.seg_id, "dub",
+                    prev.ref_start, nxt.ref_end,
+                    prev.tar_start, nxt.tar_end,
+                    prev.speed_factor,
+                    min(prev.confidence, nxt.confidence),
+                )
+                i += 2  # skip the fallback and the next dub
+                continue
+        keep.append(seg)
+        i += 1
+    segs = keep
+
+    # 4. Merge adjacent target-contiguous dub segments with matching speed.
+    out: List[SegmentEDL] = []
+    for seg in segs:
+        if out and out[-1].segment_type == seg.segment_type == "dub":
+            prev = out[-1]
+            if (
+                abs(prev.speed_factor - seg.speed_factor) < 0.003
+                and abs(prev.tar_end - seg.tar_start) < 0.2
+                and abs(prev.ref_end - seg.ref_start) <= 0.05
+            ):
+                prev.ref_end = seg.ref_end
+                prev.tar_end = seg.tar_end
+                continue
+        out.append(seg)
+
+    for idx, s in enumerate(out):
+        s.seg_id = idx
+    return out
 
 
 class AudioSplicerEngine:
@@ -210,8 +310,9 @@ class AudioSplicerEngine:
                 if speed <= 0 or abs(speed - 1.0) < 0.002:
                     speed = 1.0
 
-                # Broadcast speed clamp (0.90 to 1.10) to support PAL/NTSC transfers
-                speed = max(0.90, min(1.10, speed))
+                # Lock continuous-act speed to a broadcast standard (never float to an
+                # arbitrary value, which was the source of end-of-episode drift).
+                speed = snap_to_broadcast_speed(speed) if self.config.strict_speed else max(0.90, min(1.10, speed))
                 input_dur = target_dur * speed
 
                 filter_str = f"atempo={speed:.6f}" if abs(speed - 1.0) > 0.002 else "anull"
