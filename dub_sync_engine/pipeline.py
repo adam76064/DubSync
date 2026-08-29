@@ -166,7 +166,14 @@ class DubSyncPipeline:
                     )
                 if audit.false_fallbacks_healed_count > 0:
                     console.print(f"  [bold green][OK][/bold green] [bold green]Self-Healing Activated:[/bold green] Healed [bold yellow]{audit.false_fallbacks_healed_count} false fallback gap(s)[/bold yellow] ({audit.healed_duration_sec:.1f}s of continuous dub recovered).")
-                console.print(f"  [bold green][OK][/bold green] [bold cyan]Closed-Loop Audit Passed:[/bold cyan] {audit.passed_windows_pct:.1f}% frames verified (Mean Error: [bold green]{audit.mean_alignment_error_ms:.1f}ms[/bold green]).")
+                if audit.mean_alignment_error_ms is None:
+                    console.print("  [bold yellow][!][/bold yellow] [bold cyan]Closed-Loop Audit:[/bold cyan] alignment could NOT be measured "
+                                  f"({audit.windows_measured} usable probe windows). Healing: {audit.false_fallbacks_healed_count} gap(s).")
+                else:
+                    verdict = "[bold green][OK][/bold green]" if audit.passed_windows_pct >= 95.0 else "[bold yellow][!][/bold yellow]"
+                    console.print(f"  {verdict} [bold cyan]Closed-Loop Audit:[/bold cyan] {audit.passed_windows_pct:.1f}% of {audit.windows_measured} probed windows within "
+                                  f"{self.config.verifier_pass_threshold_ms:.0f}ms (Mean Error: [bold green]{audit.mean_alignment_error_ms:.1f}ms[/bold green], "
+                                  f"Peak: {audit.max_alignment_error_ms:.1f}ms).")
 
             # --- STAGE 7: Continuous Audio Splicing & Loudness Normalization ---
             synced_wav = os.path.join(temp_dir, "synced_dub.wav")

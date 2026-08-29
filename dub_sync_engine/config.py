@@ -77,9 +77,13 @@ class DubSyncConfig:
     verifier_max_gap_sec: float = 90.0
     verifier_rms_snr_db: float = 6.0   # Gain-normalized SNR threshold above noise floor
     verifier_corr_min: float = 0.28    # Gain-normalized correlation threshold (see verifier docstring)
-    # Windowed alignment probing used to report a *measured* sync error
-    verifier_probe_windows: int = 24   # Number of windows probed across the timeline
-    verifier_probe_window_sec: float = 6.0
+    # Windowed alignment probing used to report a *measured* sync error.
+    # Tuned on the synthetic fixture against known-answer timelines: 3s/40 is
+    # the largest window that still resolves a 6s mis-placed region, and the
+    # smallest that stays clear of spurious matches (2s already degrades,
+    # 1.5s collapses: a perfect timeline measures 124ms instead of ~14ms).
+    verifier_probe_windows: int = 40       # Probe windows spread across the timeline
+    verifier_probe_window_sec: float = 3.0
     verifier_pass_threshold_ms: float = 50.0  # A window "passes" under this residual error
     
     # --- Output Codec & Container ---

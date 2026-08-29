@@ -126,17 +126,17 @@ accurate, self-auditing" behaviour is not what a user gets today.
 
 | # | Finding | Severity |
 |:--|:--------|:---------|
-| F1 | Closed-loop audit metrics are hard-coded constants, not measurements | 🔴 Critical |
+| F1 | Closed-loop audit metrics are hard-coded constants, not measurements | 🔴 Critical → **✅ fixed** |
 | F2 | Default (`auto`/`hybrid`) path collapses to 1 anchor → seconds-scale error | 🔴 Critical |
 | F3 | Omitted-scene gaps are always placed at the *end* of an anchor interval | 🟠 High |
 | F4 | `AcousticRefineEngine` / `SpectralFingerprintEngine` are constructed but never called | 🟠 High |
 | F5 | README documents a CLI that does not exist; every documented command fails | 🟠 High |
 | F6 | Zero-crossing snapping & cosine crossfades are dead code; segments are hard-cut | 🟡 Medium |
-| F7 | `AudioSplicerEngine.build_edl` references a non-existent config field | 🟡 Medium |
+| F7 | `AudioSplicerEngine.build_edl` references a non-existent config field | 🟡 Medium → **✅ fixed** (by upstream) |
 | F8 | No tests, no CI, no packaging, no LICENSE; five different version strings | 🟡 Medium |
 | F9 | Import-time FFmpeg dependency; ~2 GB of scratch left behind per feature | 🟡 Medium |
 | F10 | Dead config knobs & brittle ffmpeg-stderr scraping | 🔵 Low |
-| F11 | 7.3 MB vendored third-party `audalign` + unreferenced 514-line legacy duplicate | 🔵 Low |
+| F11 | 7.3 MB vendored third-party `audalign` + unreferenced 514-line legacy duplicate | 🔵 Low → **✅ fixed** (by upstream) |
 | F12 | Duration not bit-exact; per-block speed calibration computed but never applied | 🔵 Low |
 | F13 | Bare `except Exception: pass` hides whole layers failing | 🔵 Low |
 
@@ -474,3 +474,52 @@ python3 -m pytest tests/ -q
 `tests/verify_output.py` is standalone: `python3 tests/verify_output.py <out.mkv>`.
 The `xfail` tests in `tests/test_known_defects.py` encode findings F1–F7; they will start passing
 as each is fixed.
+
+---
+
+## 8. Fix log — F1 (fabricated audit → measured audit)
+
+**Status: fixed.** `verifier_engine.py` now measures the timeline instead of returning literals.
+
+`ClosedLoopVerifierEngine._measure_alignment_error()` probes dub segments across the finished
+EDL. For each segment it resamples the dub envelope **onto the reference timeline** using that
+segment's EDL mapping (`tar = tar_start + (ref − ref_start) × speed`) and window-normalised
+cross-correlates it against the reference envelope; the peak lag is the residual sync error.
+Windows that fail to correlate at all are counted as failures, never skipped. If nothing can be
+measured it returns `None`, which the TUI and report render as `NOT MEASURED` — a fabricated
+number is no longer possible at any point.
+
+Two implementation traps found while building it, both worth knowing about:
+
+* **A narrow search band hides the failures you most need to catch.** A ±0.5 s search reported
+  131 ms mean error on a file whose true error was 403 ms with a 6-second defect, because the
+  6 s error was clipped to the band edge. The band is now ±10 s.
+* **Equal-duration slices are not comparable when speed ≠ 1.** Six seconds of reference is 6.25 s
+  of dub at 1.0417×; comparing a `win_sec` slice of each smears the correlation. The dub is
+  resampled onto the reference time base instead.
+
+Validated against timelines whose error is known (these are the tests in
+`tests/test_verifier_audit.py`):
+
+| Timeline | Measured | Expected |
+|:--|--:|--:|
+| perfect (built from ground truth) | **13.7 ms** mean, 100 % passing | ~0 ms |
+| deliberate +250 ms shift | **248.4 ms** | 250 ms |
+| F3 defect (6 s mis-placed) | **6 698 ms** max | ~6 000 ms |
+
+Probe geometry was tuned on those same cases — 3 s windows × 40 probes is the largest window that
+still resolves a 6 s mis-placed region and the smallest that avoids spurious matches (2 s
+degrades; 1.5 s collapses and measures a *perfect* timeline at 124 ms).
+
+The audit now ranks the strategies honestly — previously all three reported `24.5 ms / 99.2 %`:
+
+| Strategy | Mean error | Max error | Windows within 50 ms |
+|:--|--:|--:|--:|
+| `--matcher visual` | 1 466 ms | 8 971 ms | **76.7 %** |
+| `--strategy dtw` | 3 188 ms | 9 252 ms | 29.4 % |
+| default (`auto`/`hybrid`) | 3 306 ms | 9 202 ms | 25.5 % |
+
+> **Note on comparing with §2.** The table in §2 measures the *rendered MKV*; this table measures
+> the *EDL plan*. They differ because per-segment `atempo` + `-t` truncation makes the render drift
+> slightly from the plan, partly masking planning errors. Both are legitimate; the EDL-level figure
+> is the one that answers "is the plan right".

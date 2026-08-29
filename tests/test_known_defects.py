@@ -36,33 +36,8 @@ def M(rt, tt, c=0.9, hd=3):
 
 
 # ------------------------------------------------------------------ F1
-@xfail(reason="F1: audit metrics are hard-coded literals (verifier_engine.py:160-162)")
-def test_audit_metrics_are_measured_not_hardcoded(tmp_path):
-    """Two very different timelines must not produce identical audit numbers."""
-    import numpy as np
-    from scipy.io import wavfile
-
-    rng = np.random.default_rng(3)
-    for name in ("ref.wav", "tar.wav"):
-        wavfile.write(str(tmp_path / name), 48000,
-                      (rng.standard_normal(48000 * 5) * 8000).astype(np.int16))
-
-    verifier = ClosedLoopVerifierEngine(DubSyncConfig())
-
-    good = [SegmentEDL(0, "dub", 0.0, 30.0, 0.0, 30.0, 1.0, 0.95),
-            SegmentEDL(1, "dub", 30.0, 60.0, 30.0, 60.0, 1.0, 0.95)]
-    bad = [SegmentEDL(0, "dub", 0.0, 30.0, 5.0, 35.0, 1.0, 0.95),
-           SegmentEDL(1, "fallback", 30.0, 45.0, 35.0, 35.0, 1.0, 1.0),
-           SegmentEDL(2, "dub", 45.0, 60.0, 45.0, 60.0, 1.0, 0.95)]
-
-    _, audit_good = verifier.audit_and_heal_edl(
-        good, str(tmp_path / "ref.wav"), str(tmp_path / "tar.wav"), 60.0, 60.0)
-    _, audit_bad = verifier.audit_and_heal_edl(
-        bad, str(tmp_path / "ref.wav"), str(tmp_path / "tar.wav"), 60.0, 60.0)
-
-    assert (audit_good.mean_alignment_error_ms, audit_good.passed_windows_pct) != \
-           (audit_bad.mean_alignment_error_ms, audit_bad.passed_windows_pct), \
-        "audit reported identical numbers for a good and a badly mis-synced timeline"
+# F1 (fabricated audit metrics) is FIXED - see tests/test_verifier_audit.py,
+# which now pins the measured audit against timelines of known error.
 
 
 # ------------------------------------------------------------- F2 / F7

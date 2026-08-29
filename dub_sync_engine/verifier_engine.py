@@ -35,12 +35,13 @@ from .audio_splicer import SegmentEDL
 @dataclass
 class VerificationAudit:
     total_probed_windows:       int
-    mean_alignment_error_ms:    float
-    max_alignment_error_ms:     float
-    passed_windows_pct:         float
+    mean_alignment_error_ms:    Optional[float]   # None when it could not be measured
+    max_alignment_error_ms:     Optional[float]
+    passed_windows_pct:         Optional[float]
     false_fallbacks_healed_count: int
     healed_duration_sec:        float
     audit_log:                  List[Dict[str, Any]] = field(default_factory=list)
+    windows_measured:           int = 0           # windows that yielded a usable measurement
 
 
 class ClosedLoopVerifierEngine:
@@ -176,16 +177,185 @@ class ClosedLoopVerifierEngine:
         for idx, s in enumerate(compact_edl):
             s.seg_id = idx
 
+        # ── Measure the residual sync error on the FINAL timeline ─────────────
+        # This is a real measurement, not a constant: every dub segment is
+        # probed with normalised cross-correlation against the reference.
+        mean_ms, max_ms, passed_pct, n_measured = self._measure_alignment_error(
+            compact_edl, ref_wav_path, tar_wav_path
+        )
+
         audit = VerificationAudit(
             total_probed_windows        = len(audit_records),
-            mean_alignment_error_ms     = 24.5,   # Updated from empirical drift
-            max_alignment_error_ms      = 38.0,
-            passed_windows_pct          = 99.2,
+            mean_alignment_error_ms     = mean_ms,
+            max_alignment_error_ms      = max_ms,
+            passed_windows_pct          = passed_pct,
             false_fallbacks_healed_count= false_fallbacks_healed,
             healed_duration_sec         = round(healed_duration, 2),
             audit_log                   = audit_records,
+            windows_measured            = n_measured,
         )
         return compact_edl, audit
+
+    # ── Alignment measurement ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _me_envelope(audio: np.ndarray, sr: int, band: Optional[Tuple[float, float]] = None) -> Tuple[np.ndarray, float]:
+        """
+        RMS envelope at ~1 ms resolution.
+
+        Defaults to the FULL band, because what makes a measurement reliable is
+        aperiodic structure - the pattern of speech bursts and pauses, which a
+        dub preserves even though the words change. Narrow-banded M&E energy
+        tends to be quasi-periodic (a steady beat), which produces spurious
+        period-shifted correlation peaks over a wide search window.
+        """
+        sig = audio.astype(np.float64)
+        if band is not None:
+            nyq = sr / 2.0
+            lo, hi = band[0] / nyq, min(band[1] / nyq, 0.95)
+            if hi > lo:
+                b, a = scipy.signal.butter(3, [lo, hi], btype="band")
+                sig = scipy.signal.filtfilt(b, a, sig)
+
+        win = max(1, int(0.001 * sr))          # 1 ms bins
+        csum = np.cumsum(np.insert(sig * sig, 0, 0.0))
+        env = np.sqrt(np.maximum(csum[win:] - csum[:-win], 0.0) / win)[::win]
+        env = env - env.mean()                  # remove DC so silence cannot bias the peak
+        return env, win / sr
+
+    def _measure_alignment_error(
+        self,
+        edl: List[SegmentEDL],
+        ref_wav_path: str,
+        tar_wav_path: str,
+    ) -> Tuple[Optional[float], Optional[float], Optional[float], int]:
+        """
+        Probes dub segments across the finished timeline and measures how far
+        the dub content sitting at reference time T is from the reference
+        content at T.
+
+        Method: each segment's dub envelope is resampled onto the reference
+        timeline using that segment's EDL mapping (tar = tar_start +
+        (ref - ref_start) * speed) and window-normalised cross-correlated
+        against the reference envelope. The peak lag is the residual sync error.
+
+        Returns (mean_ms, max_ms, passed_pct, windows_measured). Any statistic
+        is None when nothing could be measured - the caller must render that as
+        "not measured", never as a fabricated number.
+        """
+        try:
+            sr_r, audio_r = wavfile.read(ref_wav_path)
+            sr_t, audio_t = wavfile.read(tar_wav_path)
+            audio_r = self._to_mono_float(audio_r)
+            audio_t = self._to_mono_float(audio_t)
+
+            env_r, bin_r = self._me_envelope(audio_r, sr_r)
+            env_t, bin_t = self._me_envelope(audio_t, sr_t)
+            if np.linalg.norm(env_r) < 1e-9 or np.linalg.norm(env_t) < 1e-9:
+                return None, None, None, 0
+
+            ref_total = len(env_r) * bin_r
+            tar_grid = np.arange(len(env_t)) * bin_t
+
+            dub_segs = [s for s in edl if s.segment_type == "dub" and s.ref_duration > 0.5]
+            if not dub_segs:
+                return None, None, None, 0
+
+            n_windows  = max(1, int(self.config.verifier_probe_windows))
+            win_sec    = float(self.config.verifier_probe_window_sec)
+            # Wide enough to catch gross mis-sync (a whole scene bridged or
+            # shifted), which a sub-second search window would clip.
+            max_lag_sec = 10.0
+            pass_ms     = float(self.config.verifier_pass_threshold_ms)
+
+            errors_ms      = []
+            n_probed       = 0
+            n_unmeasurable = 0
+
+            total_dub = sum(s.ref_duration for s in dub_segs)
+            for seg in dub_segs:
+                speed = seg.speed_factor if seg.speed_factor > 0 else 1.0
+                share = max(1, int(round(n_windows * seg.ref_duration / total_dub)))
+                step  = max(0.5, (seg.ref_duration - win_sec) / max(1, share))
+                nb    = max(1, int(round(win_sec / bin_r)))
+                lag_b = int(max_lag_sec / bin_r)
+
+                # Reference-time grid covering the segment plus search margin
+                g0 = max(0.0, seg.ref_start - max_lag_sec)
+                g1 = min(ref_total, seg.ref_end + max_lag_sec + win_sec)
+                if g1 - g0 < win_sec:
+                    continue
+                grid = np.arange(g0, g1, bin_r)
+
+                # The dub envelope resampled onto the reference timeline via the
+                # EDL mapping: ref time r  ->  tar time tar_start + (r-ref_start)*speed
+                tar_times = seg.tar_start + (grid - seg.ref_start) * speed
+                dub_on_ref = np.interp(tar_times, tar_grid, env_t, left=0.0, right=0.0)
+                ref_on_ref = np.interp(grid, np.arange(len(env_r)) * bin_r, env_r,
+                                       left=0.0, right=0.0)
+
+                for i in range(share):
+                    off = min(i * step, max(0.0, seg.ref_duration - win_sec))
+                    i0 = int(round((seg.ref_start + off - g0) / bin_r))
+                    if i0 < 0 or i0 + nb > len(ref_on_ref):
+                        continue
+                    n_probed += 1
+
+                    ref_win = ref_on_ref[i0 : i0 + nb]
+                    if np.linalg.norm(ref_win) < 1e-9:
+                        n_unmeasurable += 1      # silent reference: nothing to align to
+                        continue
+
+                    lo = max(0, i0 - lag_b)
+                    hi = min(len(dub_on_ref), i0 + lag_b + nb)
+                    region = dub_on_ref[lo:hi]
+                    if len(region) < nb + 1:
+                        n_unmeasurable += 1
+                        continue
+
+                    corr = scipy.signal.correlate(region, ref_win, mode="valid", method="fft")
+                    csum = np.cumsum(np.insert(region.astype(np.float64) ** 2, 0, 0.0))
+                    energy = csum[nb:] - csum[:-nb]
+                    ncc = corr[: len(energy)] / (
+                        np.sqrt(np.maximum(energy, 0)) * np.linalg.norm(ref_win) + 1e-9
+                    )
+                    if len(ncc) == 0:
+                        n_unmeasurable += 1
+                        continue
+
+                    k = int(np.argmax(ncc))
+                    peak = float(ncc[k])
+                    if peak < 0.15:
+                        # The dub does not resemble the reference here at all.
+                        # That IS a sync failure - count it, never skip it.
+                        n_unmeasurable += 1
+                        continue
+
+                    # Parabolic interpolation for sub-bin precision
+                    if 0 < k < len(ncc) - 1:
+                        alpha, beta, gamma = float(ncc[k - 1]), peak, float(ncc[k + 1])
+                        denom = 2.0 * (2.0 * beta - alpha - gamma)
+                        if abs(denom) > 1e-9:
+                            k = k + (alpha - gamma) / denom
+
+                    lag_bins = (lo + k) - i0
+                    errors_ms.append(abs(lag_bins * bin_r) * 1000.0)
+
+            if not errors_ms:
+                # Either nothing at all was probed, or every window failed to
+                # correlate - in both cases no accuracy figure may be claimed.
+                return (None, None, 0.0, 0) if n_unmeasurable else (None, None, None, 0)
+
+            n_pass = sum(1 for e in errors_ms if e <= pass_ms)
+            return (
+                round(float(np.mean(errors_ms)), 2),
+                round(float(np.max(errors_ms)), 2),
+                round(100.0 * n_pass / max(1, n_probed), 1),
+                len(errors_ms),
+            )
+        except Exception:
+            # Measurement failed - report nothing rather than invent a number.
+            return None, None, None, 0
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 

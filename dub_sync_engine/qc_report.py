@@ -255,9 +255,17 @@ class ForensicReportGenerator:
         if audit:
             md.append("## 7. Closed-Loop Auto-Verification Audit Scorecard\n")
             md.append(f"* **Probed Audit Windows:** {audit.get('total_probed_windows', 0)}")
-            md.append(f"* **Timeline Verification Coverage:** {audit.get('passed_windows_pct', 100.0):.1f}%")
-            md.append(f"* **Mean Alignment Error:** `{audit.get('mean_alignment_error_ms', 0):.1f} ms`")
-            md.append(f"* **Max Peak Error:** `{audit.get('max_alignment_error_ms', 0):.1f} ms`")
+            _mean = audit.get("mean_alignment_error_ms")
+            _max = audit.get("max_alignment_error_ms")
+            _pct = audit.get("passed_windows_pct")
+            if _mean is None:
+                md.append(f"* **Alignment Measurement:** `NOT MEASURED` — no probe window produced a usable "
+                          f"correlation peak, so no accuracy figure is claimed.")
+            else:
+                md.append(f"* **Timeline Verification Coverage:** {_pct:.1f}%")
+                md.append(f"* **Mean Alignment Error:** `{_mean:.1f} ms`")
+                md.append(f"* **Max Peak Error:** `{_max:.1f} ms`")
+            md.append(f"* **Probe Windows Measured:** {audit.get('windows_measured', 0)}")
             md.append(f"* **Healed False Fallbacks:** **{audit.get('false_fallbacks_healed_count', 0)} gaps** ({audit.get('healed_duration_sec', 0):.1f}s of continuous dub preserved)\n")
             md.append("\n---\n")
 
