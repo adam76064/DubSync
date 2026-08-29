@@ -20,9 +20,10 @@ def main():
     parser.add_argument("foreign_video", nargs="?", help="Foreign Dub video (e.g. Arabic TV / Web MP4)")
     parser.add_argument("output_video", nargs="?", help="Output MKV file path")
 
-    parser.add_argument("--preset", choices=["studio", "balanced", "fast"], default="studio",
+    parser.add_argument("--preset", choices=["studio", "studio_ultra", "balanced", "fast"], default="studio",
                         help="Accuracy preset (studio=maximum precision, balanced=standard, fast=quick)")
-    parser.add_argument("--matcher", choices=["auto", "visual", "orb", "spectral", "vad"], default="auto",
+    parser.add_argument("--matcher", "--matcher-mode", dest="matcher",
+                        choices=["auto", "visual", "orb", "spectral", "vad"], default="auto",
                         help="Matching engine mode: auto (Tier 1->2->3), visual (Tier 1), orb (Tier 2), spectral (Tier 3), vad (Neural ML VAD)")
     parser.add_argument("--strategy", choices=["hybrid", "blocks", "dtw", "auto"], default="hybrid",
                         help="Audio synchronization strategy: hybrid (Multi-Modal Consensus + Closed-Loop Auto-Verification), blocks (Adaptive Macro-Blocks), dtw (Neural DTW)")
@@ -30,8 +31,13 @@ def main():
                         help="Visual scene-change detection sensitivity")
     parser.add_argument("--tar_lang", default="ara", help="ISO 639-2 code for foreign dub (default: ara)")
     parser.add_argument("--ref_lang", default="eng", help="ISO 639-2 code for reference audio (default: eng)")
-    parser.add_argument("--fallback", choices=["vocal_filtered", "full_reference", "silence"], default="vocal_filtered",
+    parser.add_argument("--fallback", "--fallback-mode", dest="fallback",
+                        choices=["vocal_filtered", "full_reference", "silence"], default="vocal_filtered",
                         help="Audio fallback mode for scenes omitted in the foreign version")
+    parser.add_argument("--report", dest="report", action="store_true", default=True,
+                        help="Generate forensic diagnostic reports (JSON + Markdown)")
+    parser.add_argument("--no-report", dest="report", action="store_false",
+                        help="Disable forensic diagnostic report generation")
     parser.add_argument("--interactive", "-i", action="store_true", help="Force interactive TUI setup mode")
 
     args = parser.parse_args()
@@ -40,10 +46,11 @@ def main():
         ref_lang=args.ref_lang,
         tar_lang=args.tar_lang,
         scene_threshold=args.scene_threshold,
-        matcher_mode=args.matcher
+        matcher_mode=args.matcher,
+        generate_report=args.report
     )
 
-    if args.preset == "studio":
+    if args.preset in ("studio", "studio_ultra"):
         config.apply_preset(Preset.STUDIO_ULTRA)
     elif args.preset == "balanced":
         config.apply_preset(Preset.BALANCED)

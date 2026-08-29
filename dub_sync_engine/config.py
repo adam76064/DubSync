@@ -56,6 +56,7 @@ class DubSyncConfig:
     zero_crossing_window_ms: float = 3.0# Search window for zero-crossing in ms
     crossfade_duration_ms: float = 10.0# Equal-power cosine crossfade duration in ms
     max_speed_deformation: float = 0.05# Maximum allowable speed stretch per continuous scene (5%)
+    min_scene_duration_sec: float = 0.20 # Minimum scene span (s) to retain as a distinct EDL segment
     fallback_mode: FallbackMode = FallbackMode.VOCAL_FILTERED
     
     # --- Output Codec & Container ---
@@ -67,6 +68,7 @@ class DubSyncConfig:
     # --- Debug & Performance ---
     num_threads: int = 0               # 0 = auto-detect all available CPU cores
     verbose: bool = False
+    generate_report: bool = True       # Write forensic JSON/Markdown diagnostic reports
     
     def apply_preset(self, preset: Preset):
         self.preset = preset

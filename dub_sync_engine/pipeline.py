@@ -14,7 +14,7 @@ from rich.console import Console
 
 from .config import DubSyncConfig
 from .media_probe import MediaProbe, MediaInfo
-from .visual_anchors import VisualAnchorEngine
+from .visual_anchors import VisualAnchorEngine, AnchorMatch
 from .block_segmenter import BlockSegmenterEngine, ContinuousBlock
 from .orb_matcher import ORBMatcherEngine
 from .spectral_fingerprint import SpectralFingerprintEngine
@@ -72,9 +72,12 @@ class DubSyncPipeline:
             ref_wav = os.path.join(temp_dir, "ref_pcm.wav")
             tar_wav = os.path.join(temp_dir, "tar_pcm.wav")
 
+            ref_audio_idx = self.probe.select_audio_stream(ref_info, self.config.ref_lang)
+            tar_audio_idx = self.probe.select_audio_stream(tar_info, self.config.tar_lang)
+
             with console.status("[bold cyan]Stage 2/7: Extracting uncompressed 48kHz PCM audio...[/bold cyan]", spinner="dots"):
-                self.probe.extract_pcm_wav(ref_path, ref_wav, sample_rate=self.config.audio_sample_rate)
-                self.probe.extract_pcm_wav(tar_path, tar_wav, sample_rate=self.config.audio_sample_rate)
+                self.probe.extract_pcm_wav(ref_path, ref_wav, sample_rate=self.config.audio_sample_rate, stream_index=ref_audio_idx)
+                self.probe.extract_pcm_wav(tar_path, tar_wav, sample_rate=self.config.audio_sample_rate, stream_index=tar_audio_idx)
                 console.print("  [bold green][OK][/bold green] PCM 48kHz audio extracted successfully.")
 
             # --- STAGE 3: Safe-Zone Crop & Keyframe Extraction ---
@@ -121,6 +124,33 @@ class DubSyncPipeline:
                 with console.status("[bold cyan]Stage 4/7 (Tier 1 Direct): Running Primary Multi-Descriptor Visual Hash Matching...[/bold cyan]", spinner="dots"):
                     visual_matches = self.visual_engine.match_anchors(ref_anchors, tar_anchors)
                 console.print(f"  [bold green][OK][/bold green] [bold cyan]Tier 1 (Visual Hash)[/bold cyan] formed [bold green]{len(visual_matches)} visual anchors[/bold green].")
+
+            # --- STAGE 4b: Sub-Millisecond Acoustic Refinement ---
+            # Snap visual/consensus anchor cut points to sample-accurate audio transients.
+            # Only meaningful for scene-cut-based anchors (visual, ORB, consensus) — not for
+            # pure speech (VAD) or music-envelope (spectral) anchor sets.
+            if (
+                self.config.enable_acoustic_refine
+                and visual_matches
+                and mode in ("auto", "visual", "orb")
+                and strategy != "dtw"
+            ):
+                with console.status("[bold cyan]Stage 4b/7 (Acoustic Refine): Sub-millisecond 48kHz cross-correlation snapping...[/bold cyan]", spinner="dots"):
+                    refined = self.acoustic_engine.refine_anchors(ref_wav, tar_wav, visual_matches)
+                    visual_matches = [
+                        AnchorMatch(
+                            ref_idx=i,
+                            tar_idx=i,
+                            ref_time=r.ref_time,
+                            tar_time=r.tar_time,
+                            hash_dist=0,
+                            confidence=round(r.combined_confidence, 3),
+                            offset=round(r.tar_time - r.ref_time, 4),
+                        )
+                        for i, r in enumerate(refined)
+                    ]
+                avg_shift_ms = sum(r.acoustic_offset_ms for r in refined) / max(1, len(refined))
+                console.print(f"  [bold green][OK][/bold green] [bold cyan]Acoustic Refine[/bold cyan] snapped {len(visual_matches)} anchors (mean acoustic shift: [bold yellow]{avg_shift_ms:+.2f}ms[/bold yellow]).")
 
             # --- STAGE 5: Adaptive Block Clustering or Neural DTW Warping ---
             if strategy == "dtw":
@@ -283,11 +313,13 @@ class DubSyncPipeline:
                 }
             }
 
-            from .qc_report import ForensicReportGenerator
-            json_report, md_report = ForensicReportGenerator.generate_and_save(forensic_payload, output_path)
-            console.print(f"  [bold green][OK][/bold green] Comprehensive Forensic Diagnostic Report saved:")
-            console.print(f"       -> JSON: [cyan]{json_report}[/cyan]")
-            console.print(f"       -> Markdown: [cyan]{md_report}[/cyan]")
+            json_report, md_report = None, None
+            if self.config.generate_report:
+                from .qc_report import ForensicReportGenerator
+                json_report, md_report = ForensicReportGenerator.generate_and_save(forensic_payload, output_path)
+                console.print(f"  [bold green][OK][/bold green] Comprehensive Forensic Diagnostic Report saved:")
+                console.print(f"       -> JSON: [cyan]{json_report}[/cyan]")
+                console.print(f"       -> Markdown: [cyan]{md_report}[/cyan]")
 
             console.print()
             # Summary display

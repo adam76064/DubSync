@@ -71,14 +71,14 @@ class SileroVADEngine:
         num_chunks = len(audio_16k) // self.chunk_size
         probabilities = np.zeros(num_chunks, dtype=np.float32)
 
-        # Initialize recurrent state and 64-sample rolling context
+        # Initialize recurrent state (Silero VAD v5 uses a 512-sample chunk with no
+        # separate rolling context — the recurrent hidden state carries the history).
         state = np.zeros((2, 1, 128), dtype=np.float32)
         sr_tensor = np.array(self.sample_rate, dtype=np.int64)
-        context = np.zeros(64, dtype=np.float32)
 
         for i in range(num_chunks):
             chunk = audio_16k[i * self.chunk_size : (i + 1) * self.chunk_size]
-            model_input = np.concatenate([context, chunk]).reshape(1, 576).astype(np.float32)
+            model_input = chunk.reshape(1, self.chunk_size).astype(np.float32)
 
             inputs = {
                 "input": model_input,
@@ -87,7 +87,6 @@ class SileroVADEngine:
             }
             out, state = self.session.run(None, inputs)
             probabilities[i] = float(out[0][0])
-            context = chunk[-64:]
 
         time_step = self.chunk_size / float(self.sample_rate)  # 0.032s (32ms)
         return probabilities, time_step
