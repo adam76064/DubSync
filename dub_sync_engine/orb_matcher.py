@@ -173,7 +173,8 @@ class ORBMatcherEngine:
                 tar_time=c["tar_time"],
                 hash_dist=max(0, 10 - int(c["inliers"] / 3)),
                 confidence=round(c["confidence"], 3),
-                offset=round(c["offset"], 4)
+                offset=round(c["offset"], 4),
+                source="orb"
             ))
             curr = parent[curr]
 

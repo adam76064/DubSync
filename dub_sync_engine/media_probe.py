@@ -182,20 +182,55 @@ class MediaProbe:
         return media_info
 
     @staticmethod
-    def extract_pcm_wav(input_media: str, output_wav: str, sample_rate: int = 48000, channels: int = 2) -> str:
+    def select_audio_stream(info: "MediaInfo", language: str = "") -> Optional[int]:
+        """
+        Picks the audio stream index best matching the requested ISO 639-2 language code.
+        Falls back to the primary (first) audio stream, then to None when no audio exists.
+        """
+        if not info.audio_streams:
+            return None
+
+        lang = (language or "").strip().lower()
+        if lang:
+            for s in info.audio_streams:
+                if (s.language or "").lower() == lang:
+                    return s.index
+            for s in info.audio_streams:
+                if (s.language or "").lower().startswith(lang[:2]):
+                    return s.index
+
+        return info.primary_audio.index
+
+    @staticmethod
+    def extract_pcm_wav(
+        input_media: str,
+        output_wav: str,
+        sample_rate: int = 48000,
+        channels: int = 2,
+        stream_index: Optional[int] = None
+    ) -> str:
         """
         Extracts pristine uncompressed 16-bit PCM WAV audio.
+
+        When ``stream_index`` is provided (an absolute container stream index, as
+        returned by :meth:`select_audio_stream`), that stream is explicitly mapped
+        (``-map 0:<index>``) so multi-audio containers select the intended language
+        track instead of relying on FFmpeg's best-stream heuristic.
         """
         os.makedirs(os.path.dirname(os.path.abspath(output_wav)), exist_ok=True)
-        
+
         cmd = [
             FFMPEG_PATH, "-hide_banner", "-loglevel", "warning",
             "-i", input_media,
             "-vn",
+        ]
+        if stream_index is not None:
+            cmd.extend(["-map", f"0:{stream_index}"])
+        cmd.extend([
             "-c:a", "pcm_s16le",
             "-ar", str(sample_rate),
             "-ac", str(channels),
             "-y", output_wav
-        ]
+        ])
         run_ffmpeg_cmd(cmd, desc=f"Extracting PCM Audio: {os.path.basename(input_media)}")
         return output_wav

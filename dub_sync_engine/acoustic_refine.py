@@ -20,6 +20,12 @@ class RefinedAnchor:
     visual_offset_s: float
     acoustic_confidence: float
     combined_confidence: float
+    # Preserved from the source AnchorMatch (so the forensic report keeps the
+    # modality, N-gram rhythm and confirmation weight after refinement).
+    seq_len: int = 1
+    weight: float = 1.0
+    source: str = "unknown"
+    hash_dist: int = 0
 
 
 class AcousticRefineEngine:
@@ -48,7 +54,11 @@ class AcousticRefineEngine:
                     acoustic_offset_ms=0.0,
                     visual_offset_s=m.offset,
                     acoustic_confidence=1.0,
-                    combined_confidence=m.confidence
+                    combined_confidence=m.confidence,
+                    seq_len=m.seq_len,
+                    weight=getattr(m, "weight", 1.0),
+                    source=getattr(m, "source", "unknown"),
+                    hash_dist=m.hash_dist,
                 )
                 for m in matches
             ]
@@ -83,27 +93,28 @@ class AcousticRefineEngine:
             r_center = int(m.ref_time * sr_ref)
             t_center = int(m.tar_time * sr_tar)
 
-            # Check bounds
-            if r_center - win_samples < 0 or r_center + win_samples >= len(ref_mono):
-                refined.append(RefinedAnchor(
+            def _passthrough(acoustic_confidence: float) -> RefinedAnchor:
+                """Keep visual timing, tag the acoustic refinement result, preserve metadata."""
+                return RefinedAnchor(
                     ref_time=m.ref_time,
                     tar_time=m.tar_time,
                     acoustic_offset_ms=0.0,
                     visual_offset_s=m.offset,
-                    acoustic_confidence=0.5,
-                    combined_confidence=m.confidence
-                ))
+                    acoustic_confidence=acoustic_confidence,
+                    combined_confidence=m.confidence,
+                    seq_len=m.seq_len,
+                    weight=getattr(m, "weight", 1.0),
+                    source=getattr(m, "source", "unknown"),
+                    hash_dist=m.hash_dist,
+                )
+
+            # Check bounds
+            if r_center - win_samples < 0 or r_center + win_samples >= len(ref_mono):
+                refined.append(_passthrough(0.5))
                 continue
 
             if t_center - search_radius - win_samples < 0 or t_center + search_radius + win_samples >= len(tar_mono):
-                refined.append(RefinedAnchor(
-                    ref_time=m.ref_time,
-                    tar_time=m.tar_time,
-                    acoustic_offset_ms=0.0,
-                    visual_offset_s=m.offset,
-                    acoustic_confidence=0.5,
-                    combined_confidence=m.confidence
-                ))
+                refined.append(_passthrough(0.5))
                 continue
 
             ref_slice = ref_mono[r_center - win_samples : r_center + win_samples]
@@ -112,14 +123,7 @@ class AcousticRefineEngine:
             ref_norm = np.linalg.norm(ref_slice)
             if ref_norm < 1e-4:
                 # Silent region: retain visual timing
-                refined.append(RefinedAnchor(
-                    ref_time=m.ref_time,
-                    tar_time=m.tar_time,
-                    acoustic_offset_ms=0.0,
-                    visual_offset_s=m.offset,
-                    acoustic_confidence=0.5,
-                    combined_confidence=m.confidence
-                ))
+                refined.append(_passthrough(0.5))
                 continue
 
             # Compute cross-correlation
@@ -163,7 +167,11 @@ class AcousticRefineEngine:
                 acoustic_offset_ms=round(shift_ms, 2),
                 visual_offset_s=m.offset,
                 acoustic_confidence=round(ac_conf, 3),
-                combined_confidence=comb_conf
+                combined_confidence=comb_conf,
+                seq_len=m.seq_len,
+                weight=getattr(m, "weight", 1.0),
+                source=getattr(m, "source", "unknown"),
+                hash_dist=m.hash_dist,
             ))
 
             if progress_callback:

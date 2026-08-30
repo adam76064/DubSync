@@ -62,8 +62,11 @@ pip install -r requirements.txt
 
 ### Basic CLI Command
 ```bash
-python -m dub_sync_engine.cli --ref "path/to/Master.Video.1080p.mkv" --tar "path/to/Foreign_Dub_Episode.mp4" --out "path/to/Master_Synced.mkv"
+python -m dub_sync_engine.cli "path/to/Master.Video.1080p.mkv" "path/to/Foreign_Dub_Episode.mp4" "path/to/Master_Synced.mkv"
 ```
+
+The three positional arguments are `<reference video>`, `<foreign dub video>`, and `<output MKV>`
+(in that order). If you omit them, the interactive TUI will prompt for the paths.
 
 ### Interactive Wrapper
 ```bash
@@ -73,14 +76,17 @@ python run_dub_sync.py
 ### Common Flags & Options
 | Flag | Description | Default |
 | :--- | :--- | :--- |
-| `--ref` | Path to reference master video/audio file | *(Required)* |
-| `--tar` | Path to foreign dub target video/audio file | *(Required)* |
-| `--out` | Output path for the synchronized MKV | `[ref_name]_Synced.mkv` |
-| `--matcher-mode` | Matching mode: `hybrid`, `audio`, `visual`, `orb`, `vad` | `hybrid` |
+| `ref_video` *(positional)* | Path to reference master video/audio file | *(Required)* |
+| `foreign_video` *(positional)* | Path to foreign dub target video/audio file | *(Required)* |
+| `output_video` *(positional)* | Output path for the synchronized MKV | `[ref_name]_Synced.mkv` |
+| `--matcher` / `--matcher-mode` | Matching mode: `auto`, `visual`, `orb`, `spectral`, `vad` | `auto` |
 | `--strategy` | Sync strategy: `hybrid`, `blocks`, `dtw` | `hybrid` |
-| `--preset` | Tuning preset: `studio_ultra`, `balanced`, `fast` | `studio_ultra` |
-| `--fallback-mode` | Fallback treatment: `vocal_filtered`, `full_reference`, `silence` | `vocal_filtered` |
-| `--report` | Generate diagnostic Markdown and JSON forensic reports | `True` |
+| `--preset` | Tuning preset: `studio` (a.k.a. `studio_ultra`), `balanced`, `fast` | `studio` |
+| `--fallback` / `--fallback-mode` | Fallback treatment: `vocal_filtered`, `full_reference`, `silence` | `vocal_filtered` |
+| `--report` / `--no-report` | Generate diagnostic Markdown and JSON forensic reports | `True` |
+| `--scene_threshold` | Visual scene-cut detection sensitivity (0.15–0.40) | `0.22` |
+| `--tar_lang` | ISO 639-2 code for the foreign dub audio | `ara` |
+| `--ref_lang` | ISO 639-2 code for the reference audio | `eng` |
 
 ---
 

@@ -38,6 +38,11 @@ class AnchorMatch:
     hash_dist: int
     confidence: float
     offset: float  # tar_time - ref_time
+    seq_len: int = 1  # number of consecutive cut matches verified (N-gram rhythm)
+    weight: float = 1.0  # continuous confirmation strength (acoustic × N-gram); feeds RANSAC fit
+    source: str = "unknown"  # modality that produced this anchor (acoustic_music/vad_speech/visual_gated/visual/orb/spectral/vad)
+    acoustic_shift_ms: float = 0.0  # sub-ms acoustic refinement applied to this anchor
+    acoustic_confidence: float = 1.0  # normalized acoustic cross-correlation peak at refinement
 
 
 class VisualAnchorEngine:
@@ -61,10 +66,17 @@ class VisualAnchorEngine:
         os.makedirs(output_dir, exist_ok=True)
         t0 = time.time()
 
-        # Build FFmpeg filter: Crop central 80% (safe zone) -> Scale to 320x180 -> Scene detection
+        # Build FFmpeg filter: Crop central 80% (safe zone) -> scale to a canonical
+        # 320x180 canvas *preserving aspect ratio* (pad with black) -> scene detect.
+        # A straight `scale=320:180` would stretch a 4:3 source to 16:9 and corrupt
+        # the perceptual hash; aspect-preserving scale + pad keeps the content
+        # geometry intact across mixed 16:9 / 4:3 sources.
         crop_pct = self.config.center_crop_ratio
         crop_filter = f"crop=iw*{crop_pct}:ih*{crop_pct}:(iw-iw*{crop_pct})/2:(ih-ih*{crop_pct})/2"
-        scale_filter = "scale=320:180"
+        scale_filter = (
+            "scale=320:180:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+            "pad=320:180:(ow-iw)/2:(oh-ih)/2:color=black"
+        )
         scene_filter = f"select='gt(scene,{self.config.scene_threshold})'"
         full_vf = f"{crop_filter},{scale_filter},{scene_filter},showinfo"
 
@@ -114,9 +126,11 @@ class VisualAnchorEngine:
                         if cropped.shape[0] > 10 and cropped.shape[1] > 10:
                             cv_img = cropped
 
-                    # Standardize to 16:9 normalized canvas
-                    cv_img = cv2.resize(cv_img, (320, 180))
-
+                    # Hash at the native (aspect-preserved) size: imagehash resizes
+                    # internally (pHash -> 32x32, dHash -> 9x8), and the color
+                    # histogram is normalized, so re-stretching to 320x180 here
+                    # would only re-introduce the aspect distortion we removed in
+                    # the FFmpeg scale.
                     pil_img = Image.fromarray(cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB))
                     p_h = imagehash.phash(pil_img)
                     d_h = imagehash.dhash(pil_img)
@@ -196,6 +210,11 @@ class VisualAnchorEngine:
                                         score += (10.0 - c_k) * 1.5
 
                     if seq_len >= 2:
+                        confidence = min(1.0, confidence + 0.10)
+                        score += 6.0 * (seq_len - 1)
+                    if seq_len >= 3:
+                        # A chain of 3 consecutive camera cuts is virtually unique in
+                        # animation — grant a strong confidence boost.
                         confidence = min(1.0, confidence + 0.20)
                         score += 15.0 * (seq_len - 1)
 
@@ -265,7 +284,9 @@ class VisualAnchorEngine:
                 tar_time=c["tar_time"],
                 hash_dist=c["hash_dist"],
                 confidence=round(c["confidence"], 3),
-                offset=round(c["offset"], 4)
+                offset=round(c["offset"], 4),
+                seq_len=c["seq_len"],
+                source="visual"
             )
             chain.append(match)
             curr = parent[curr]

@@ -11,7 +11,7 @@ from typing import List, Dict, Optional, Tuple
 import numpy as np
 import scipy.io.wavfile as wavfile
 
-from .config import DubSyncConfig, FallbackMode
+from .config import DubSyncConfig, FallbackMode, snap_to_broadcast_speed
 from .acoustic_refine import RefinedAnchor
 from .media_probe import FFMPEG_PATH, run_ffmpeg_cmd
 
@@ -34,6 +34,106 @@ class SegmentEDL:
     @property
     def tar_duration(self) -> float:
         return self.tar_end - self.tar_start
+
+
+def sanitize_edl(edl: List["SegmentEDL"], config: DubSyncConfig) -> List["SegmentEDL"]:
+    """
+    Post-process an EDL to remove the artifacts the history identified:
+
+    1. Reclassify tiny dub fragments sandwiched between fallbacks as fallback
+       (ambient noise inside a real cut → don't emit a 1.7s Arabic "blip").
+    2. Merge adjacent fallback segments into a single clean bridge.
+    3. Absorb micro-fallbacks (< micro_fallback_merge_sec) whose target audio is
+       actually contiguous (a false cut) — dropping them lets the surrounding dub
+       segments merge back into one continuous act.
+    4. Merge adjacent dub segments that share a speed and are target-contiguous.
+
+    Returns a new, re-indexed list (input is not mutated).
+    """
+    if not edl:
+        return edl
+
+    segs = list(edl)
+
+    # 1. Tiny dub fragments between fallbacks -> fallback (ambient noise in a cut).
+    for i, seg in enumerate(segs):
+        if seg.segment_type != "dub":
+            continue
+        if seg.ref_duration >= config.min_dub_act_sec:
+            continue
+        prev_fb = i > 0 and segs[i - 1].segment_type == "fallback"
+        next_fb = i < len(segs) - 1 and segs[i + 1].segment_type == "fallback"
+        if prev_fb or next_fb:
+            segs[i] = SegmentEDL(
+                seg.seg_id, "fallback",
+                seg.ref_start, seg.ref_end,
+                seg.tar_start, seg.tar_end,
+                1.0, seg.confidence,
+            )
+
+    # 2. Merge adjacent fallbacks.
+    merged: List[SegmentEDL] = []
+    for seg in segs:
+        if merged and merged[-1].segment_type == seg.segment_type == "fallback":
+            prev = merged[-1]
+            if abs(prev.ref_end - seg.ref_start) <= 0.05:
+                prev.ref_end = seg.ref_end
+                continue
+        merged.append(seg)
+    segs = merged
+
+    # 3. Absorb micro-fallbacks with contiguous target audio (false cuts) by merging
+    #    the surrounding dub segments directly across the gap.
+    keep: List[SegmentEDL] = []
+    i = 0
+    while i < len(segs):
+        seg = segs[i]
+        if (
+            seg.segment_type == "fallback"
+            and seg.ref_duration < config.micro_fallback_merge_sec
+            and 0 < i < len(segs) - 1
+            and keep
+        ):
+            prev = segs[i - 1]
+            nxt = segs[i + 1]
+            if (
+                prev.segment_type == "dub"
+                and nxt.segment_type == "dub"
+                and abs(prev.tar_end - nxt.tar_start) < 0.2
+            ):
+                # Target audio is continuous across the gap -> a false cut. Merge
+                # prev + next into one continuous dub spanning the fallback.
+                keep[-1] = SegmentEDL(
+                    prev.seg_id, "dub",
+                    prev.ref_start, nxt.ref_end,
+                    prev.tar_start, nxt.tar_end,
+                    prev.speed_factor,
+                    min(prev.confidence, nxt.confidence),
+                )
+                i += 2  # skip the fallback and the next dub
+                continue
+        keep.append(seg)
+        i += 1
+    segs = keep
+
+    # 4. Merge adjacent target-contiguous dub segments with matching speed.
+    out: List[SegmentEDL] = []
+    for seg in segs:
+        if out and out[-1].segment_type == seg.segment_type == "dub":
+            prev = out[-1]
+            if (
+                abs(prev.speed_factor - seg.speed_factor) < 0.003
+                and abs(prev.tar_end - seg.tar_start) < 0.2
+                and abs(prev.ref_end - seg.ref_start) <= 0.05
+            ):
+                prev.ref_end = seg.ref_end
+                prev.tar_end = seg.tar_end
+                continue
+        out.append(seg)
+
+    for idx, s in enumerate(out):
+        s.seg_id = idx
+    return out
 
 
 class AudioSplicerEngine:
@@ -182,31 +282,24 @@ class AudioSplicerEngine:
         """
         Renders all segments with sample-level retiming, zero-crossing alignment,
         and equal-power cosine crossfading.
+
+        Each segment is first rendered with FFmpeg (time-stretch for dub segments,
+        vocal-suppression for fallback segments). The rendered segments are then read
+        back and joined in memory with a true equal-power cosine crossfade (optionally
+        snapped to the nearest zero-crossing at each splice joint) before being written
+        as a single continuous PCM stream.
         """
         t0 = time.time()
         os.makedirs(temp_dir, exist_ok=True)
 
-        sr_ref, ref_audio = wavfile.read(ref_wav)
-        sr_tar, tar_audio = wavfile.read(tar_wav)
+        sr = int(self.config.audio_sample_rate)
 
-        total_ref_samples = int(edl[-1].ref_end * sr_ref) if edl else len(ref_audio)
-        channels = ref_audio.shape[1] if ref_audio.ndim > 1 else 1
-
-        # Pre-allocate output buffer
-        final_audio = np.zeros((total_ref_samples, channels), dtype=np.int16) if channels > 1 else np.zeros(total_ref_samples, dtype=np.int16)
-
-        crossfade_samples = int((self.config.crossfade_duration_ms / 1000.0) * sr_ref)
-        cf_fade_in = np.sin(np.linspace(0, np.pi / 2, crossfade_samples, dtype=np.float32)) ** 2
-        cf_fade_out = np.cos(np.linspace(0, np.pi / 2, crossfade_samples, dtype=np.float32)) ** 2
-
-        if channels > 1:
-            cf_fade_in = cf_fade_in[:, np.newaxis]
-            cf_fade_out = cf_fade_out[:, np.newaxis]
-
-        # Process each segment
-        seg_files = []
+        # --- 1. Render each segment to a temporary PCM file (handles retiming/filtering) ---
+        seg_files: List[str] = []
         for i, seg in enumerate(edl):
             target_dur = seg.ref_duration
+            if target_dur <= 0:
+                continue
             out_seg_path = os.path.join(temp_dir, f"seg_{i:04d}.wav")
 
             if seg.segment_type == "dub":
@@ -216,15 +309,13 @@ class AudioSplicerEngine:
                 speed = getattr(seg, "speed_factor", 1.0)
                 if speed <= 0 or abs(speed - 1.0) < 0.002:
                     speed = 1.0
-                
-                # Broadcast speed clamp (0.90 to 1.10) to support PAL/NTSC transfers
-                speed = max(0.90, min(1.10, speed))
+
+                # Lock continuous-act speed to a broadcast standard (never float to an
+                # arbitrary value, which was the source of end-of-episode drift).
+                speed = snap_to_broadcast_speed(speed) if self.config.strict_speed else max(0.90, min(1.10, speed))
                 input_dur = target_dur * speed
 
-                if abs(speed - 1.0) > 0.002:
-                    filter_str = f"atempo={speed:.6f}"
-                else:
-                    filter_str = "anull"
+                filter_str = f"atempo={speed:.6f}" if abs(speed - 1.0) > 0.002 else "anull"
 
                 cmd = [
                     FFMPEG_PATH, "-hide_banner", "-loglevel", "warning",
@@ -232,7 +323,7 @@ class AudioSplicerEngine:
                     "-i", tar_wav,
                     "-af", filter_str,
                     "-t", f"{target_dur:.4f}",
-                    "-c:a", "pcm_s16le", "-ar", str(self.config.audio_sample_rate), "-ac", "2",
+                    "-c:a", "pcm_s16le", "-ar", str(sr), "-ac", "2",
                     "-y", out_seg_path
                 ]
                 run_ffmpeg_cmd(cmd, desc=f"Rendering Dub Segment #{i}")
@@ -254,7 +345,7 @@ class AudioSplicerEngine:
                     "-i", ref_wav,
                     "-af", filter_str,
                     "-t", f"{target_dur:.4f}",
-                    "-c:a", "pcm_s16le", "-ar", str(self.config.audio_sample_rate), "-ac", "2",
+                    "-c:a", "pcm_s16le", "-ar", str(sr), "-ac", "2",
                     "-y", out_seg_path
                 ]
                 run_ffmpeg_cmd(cmd, desc=f"Rendering Fallback Segment #{i}")
@@ -265,18 +356,75 @@ class AudioSplicerEngine:
             if progress_callback:
                 progress_callback(i + 1, len(edl))
 
-        # Concatenate using FFmpeg concat demuxer
-        concat_txt = os.path.join(temp_dir, "concat.txt")
-        with open(concat_txt, "w", encoding="utf-8") as f:
-            for sf in seg_files:
-                abs_p = os.path.abspath(sf).replace("\\", "/")
-                f.write(f"file '{abs_p}'\n")
+        if not seg_files:
+            raise RuntimeError("No audio segments were rendered — the EDL produced no output.")
 
-        cmd_concat = [
-            FFMPEG_PATH, "-hide_banner", "-loglevel", "warning",
-            "-f", "concat", "-safe", "0",
-            "-i", concat_txt,
-            "-c:a", "pcm_s16le",
-            "-y", output_synced_wav
-        ]
-        run_ffmpeg_cmd(cmd_concat, desc="Concatenating Master Synced Audio")
+        # --- 2. Read rendered segments back as int16 arrays ---
+        segments: List[np.ndarray] = []
+        channels = 2
+        for sf in seg_files:
+            _, a = wavfile.read(sf)
+            if a.ndim == 1:
+                a = a[:, np.newaxis]
+            if a.ndim == 2 and a.shape[1] == 1:
+                a = np.repeat(a, 2, axis=1)
+            segments.append(a.astype(np.int16))
+            channels = a.shape[1]
+
+        # --- 3. Zero-crossing snapping at splice joints ---
+        if self.config.zero_crossing_snap:
+            snap_window = max(1, int(self.config.zero_crossing_window_ms / 1000.0 * sr))
+            for idx in range(len(segments)):
+                seg = segments[idx]
+                mono = np.mean(seg, axis=1).astype(np.float32) if seg.ndim > 1 else seg.astype(np.float32)
+                if len(mono) <= 2 * snap_window:
+                    continue
+                # Snap the start boundary (all but the first segment).
+                if idx > 0:
+                    zc = self.find_nearest_zero_crossing(mono, 0, snap_window)
+                    if zc > 0:
+                        segments[idx] = seg[zc:]
+                # Snap the end boundary (all but the last segment).
+                if idx < len(segments) - 1:
+                    zc = self.find_nearest_zero_crossing(mono, len(mono) - 1, snap_window)
+                    if zc < len(mono) - 1:
+                        segments[idx] = segments[idx][: zc + 1]
+
+        # --- 4. Overlap-add with equal-power cosine crossfade ---
+        crossfade_samples = max(0, int(self.config.crossfade_duration_ms / 1000.0 * sr))
+        lengths = [len(s) for s in segments]
+        overlaps: List[int] = []
+        for i in range(len(segments) - 1):
+            ov = min(crossfade_samples, lengths[i], lengths[i + 1])
+            overlaps.append(ov)
+
+        total = sum(lengths) - sum(overlaps)
+        out = np.zeros((total, channels), dtype=np.int16)
+
+        pos = 0
+        for i, seg in enumerate(segments):
+            if i == 0:
+                out[pos:pos + len(seg)] = seg
+                pos += len(seg)
+                continue
+
+            ov = overlaps[i - 1]
+            if ov > 0:
+                fade_out = (np.cos(np.linspace(0, np.pi / 2, ov, dtype=np.float32)) ** 2)
+                fade_in = (np.sin(np.linspace(0, np.pi / 2, ov, dtype=np.float32)) ** 2)
+                if channels > 1:
+                    fade_out = fade_out[:, np.newaxis]
+                    fade_in = fade_in[:, np.newaxis]
+
+                prev = out[pos - ov:pos].astype(np.float32)
+                cur = seg[:ov].astype(np.float32)
+                blended = prev * fade_out + cur * fade_in
+                out[pos - ov:pos] = np.clip(blended, -32768.0, 32767.0).astype(np.int16)
+
+            rest = seg[ov:]
+            out[pos:pos + len(rest)] = rest
+            pos += len(rest)
+
+        # --- 5. Write the continuous synced stream ---
+        wavfile.write(output_synced_wav, sr, out)
+        return output_synced_wav

@@ -9,8 +9,9 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional
 
 from .visual_anchors import AnchorMatch
-from .audio_splicer import SegmentEDL
-from .config import DubSyncConfig
+from .audio_splicer import SegmentEDL, sanitize_edl
+from .config import DubSyncConfig, snap_to_broadcast_speed, BROADCAST_STANDARDS
+from .line_fit import fit_ransac_line, fit_piecewise_lines, LineFit
 
 
 @dataclass
@@ -24,6 +25,12 @@ class ContinuousBlock:
     offset: float
     anchor_count: int
     confidence: float
+    # RANSAC fit diagnostics (measured quality, not a fuzzy number).
+    r_squared: float = 0.0       # Pearson r^2 of the block's line fit
+    inlier_ratio: float = 0.0    # n_inliers / n_total for this block
+    coverage_ratio: float = 1.0  # diversity (distinct ref-time buckets / min)
+    n_buckets: int = 0           # distinct ref-time buckets spanned by inliers
+    raw_slope: float = 0.0       # pre-snap fit slope (before broadcast snapping)
 
     @property
     def ref_duration(self) -> float:
@@ -40,46 +47,50 @@ class BlockSegmenterEngine:
     def __init__(self, config: DubSyncConfig):
         self.config = config
 
+    def calibrate_global_fit(
+        self,
+        matches: List[AnchorMatch],
+        weights: Optional[List[float]] = None,
+    ) -> LineFit:
+        """
+        Robustly fit the dominant global line `tar = slope * ref + intercept`
+        through the anchor cloud using RANSAC (see `line_fit.fit_ransac_line`).
+
+        Unlike the legacy histogram-peak estimator, RANSAC discards scattered
+        false matches and cross-cut intervals automatically and returns a
+        *measured* confidence (r^2 * inlier_ratio). The slope is the speed ratio;
+        the intercept is the global offset.
+        """
+        if not matches:
+            return LineFit(1.0, 0.0, 0.0, 0.0, 0, 0, np.zeros(0, dtype=bool), 0.0)
+
+        pts = np.array([[m.ref_time, m.tar_time] for m in matches], dtype=float)
+        if weights is None:
+            weights = [getattr(m, "weight", 1.0) for m in matches]
+        return fit_ransac_line(
+            pts,
+            weights=weights,
+            inlier_tol=self.config.ransac_inlier_tolerance_sec,
+            slope_lo=self.config.ransac_slope_lo,
+            slope_hi=self.config.ransac_slope_hi,
+            coverage_bucket_sec=self.config.ransac_coverage_bucket_sec,
+            min_coverage_buckets=self.config.ransac_min_coverage_buckets,
+        )
+
     def calibrate_global_slope(self, matches: List[AnchorMatch]) -> float:
         """
-        Calculates the robust global playback clock speed ratio (m = d(ref) / d(tar))
-        across all continuous anchor segments.
+        Global playback clock speed ratio via robust RANSAC line fitting, snapped
+        to a broadcast standard.
+
+        This replaces the former length-weighted histogram-peak estimator with the
+        subsync-style RANSAC fit: it discards scattered false anchors and
+        cross-cut intervals (which the histogram had to pre-filter by hand) and is
+        immune to a minority of micro-trim intervals.
         """
-        if len(matches) < 2:
+        fit = self.calibrate_global_fit(matches)
+        if fit.n_inliers < 2:
             return 1.0
-
-        slopes = []
-        for i in range(len(matches) - 1):
-            m1 = matches[i]
-            m2 = matches[i + 1]
-
-            dt_r = m2.ref_time - m1.ref_time
-            dt_t = m2.tar_time - m1.tar_time
-
-            # Only consider intervals longer than 3 seconds to avoid frame quantization noise
-            if dt_r >= 3.0 and dt_t >= 3.0:
-                s = dt_t / dt_r
-                # Only consider physically realistic speed ratios (0.90 to 1.10)
-                if 0.90 <= s <= 1.10:
-                    slopes.append(s)
-
-        if not slopes:
-            return 1.0
-
-        median_slope = float(np.median(slopes))
-
-        # Check standard broadcast ratios:
-        # 1.000000 (1:1 standard)
-        # 24/25 = 0.960000 (PAL slowdown)
-        # 25/24 = 1.041667 (PAL speedup)
-        # 24/23.976 = 1.001001 (NTSC Film pull-down)
-        # 23.976/24 = 0.999000 (Film slowdown)
-        standards = [1.000000, 24.0 / 25.0, 25.0 / 24.0, 24.0 / 23.976, 23.976 / 24.0]
-        for std in standards:
-            if abs(median_slope - std) < 0.005:
-                return round(std, 6)
-
-        return round(median_slope, 6)
+        return snap_to_broadcast_speed(fit.slope)
 
     def cluster_into_blocks(
         self,
@@ -108,84 +119,83 @@ class BlockSegmenterEngine:
                 )
             ]
 
-        # Step 1: Discover global clock speed
-        global_slope = self.calibrate_global_slope(matches)
+        # Segment the anchor cloud into piecewise-linear acts via recursive RANSAC
+        # (subsync-style). Each act gets its own broadcast-snapped speed, so
+        # multi-speed episodes (PAL act + 1.0x act) are recovered without hand-tuned
+        # discontinuity thresholds. `discontinuity_threshold_sec` is retained for API
+        # compatibility but is superseded by the inlier-ratio split criterion.
+        pts = [[m.ref_time, m.tar_time] for m in matches]
+        weights = [getattr(m, "weight", 1.0) for m in matches]
+        # No y_bounds here: a hard target-timeline bound rejects legitimate lines
+        # whose opening offset is negative (logo gaps) whenever a false/outlier
+        # anchor sits at ref=0. RANSAC inlier counting + the broadcast slope band
+        # already reject nonsense lines; the offset is constrained by the anchors.
+        segs = fit_piecewise_lines(
+            pts,
+            weights,
+            inlier_tol=self.config.ransac_inlier_tolerance_sec,
+            slope_lo=self.config.ransac_slope_lo,
+            slope_hi=self.config.ransac_slope_hi,
+            min_inlier_ratio=self.config.ransac_min_inlier_ratio,
+            coverage_bucket_sec=self.config.ransac_coverage_bucket_sec,
+            min_coverage_buckets=self.config.ransac_min_coverage_buckets,
+        )
 
-        # Step 2: Compute normalized offset for each anchor: Offset_k = tar_time - slope * ref_time
-        anchor_offsets = [
-            m.tar_time - (global_slope * m.ref_time)
-            for m in matches
-        ]
-
-        # Step 3: Cluster anchors into contiguous linear blocks
-        raw_clusters: List[List[int]] = []
-        current_cluster: List[int] = [0]
-
-        for i in range(1, len(matches)):
-            prev_idx = current_cluster[-1]
-            curr_offset = anchor_offsets[i]
-            
-            # Median offset of current cluster so far
-            cluster_offsets = [anchor_offsets[idx] for idx in current_cluster]
-            cluster_med_offset = float(np.median(cluster_offsets))
-
-            offset_diff = abs(curr_offset - cluster_med_offset)
-
-            # Also check if target time went backwards
-            tar_diff = matches[i].tar_time - matches[prev_idx].tar_time
-            ref_diff = matches[i].ref_time - matches[prev_idx].ref_time
-
-            if offset_diff <= discontinuity_threshold_sec and tar_diff > 0:
-                current_cluster.append(i)
-            else:
-                # Discontinuity / Editorial cut detected!
-                raw_clusters.append(current_cluster)
-                current_cluster = [i]
-
-        if current_cluster:
-            raw_clusters.append(current_cluster)
-
-        # Step 4: Build ContinuousBlock objects from all clusters without dropping single-anchor knots
         blocks: List[ContinuousBlock] = []
-        block_id = 0
-        standards = [1.000000, 24.0 / 25.0, 25.0 / 24.0, 24.0 / 23.976, 23.976 / 24.0]
-
-        for c_indices in raw_clusters:
-            first_m = matches[c_indices[0]]
-            last_m = matches[c_indices[-1]]
-            r_span = last_m.ref_time - first_m.ref_time
-            t_span = last_m.tar_time - first_m.tar_time
-
-            # Compute block-level independent speed slope
-            if r_span >= 6.0 and len(c_indices) >= 2:
-                raw_block_slope = t_span / r_span
-                block_slope = raw_block_slope
-                for std in standards:
-                    if abs(raw_block_slope - std) < 0.006:
-                        block_slope = std
-                        break
-                block_slope = max(0.90, min(1.10, block_slope))
-            else:
-                block_slope = global_slope
-
-            c_offsets = [anchor_offsets[idx] for idx in c_indices]
-            med_offset = float(np.median(c_offsets))
-            c_conf = float(np.mean([matches[idx].confidence for idx in c_indices]))
+        for seg in segs:
+            fit = seg.fit
+            block_slope = (
+                snap_to_broadcast_speed(fit.slope)
+                if self.config.strict_speed else max(0.90, min(1.10, fit.slope))
+            )
+            ref_start = seg.ref_start
+            ref_end = seg.ref_end
+            tar_start = block_slope * ref_start + fit.intercept
+            tar_end = block_slope * ref_end + fit.intercept
 
             blocks.append(ContinuousBlock(
-                block_id=block_id,
-                ref_start=first_m.ref_time,
-                ref_end=last_m.ref_time,
-                tar_start=first_m.tar_time,
-                tar_end=last_m.tar_time,
+                block_id=len(blocks),
+                ref_start=round(ref_start, 3),
+                ref_end=round(ref_end, 3),
+                tar_start=round(max(0.0, tar_start), 3),
+                tar_end=round(min(tar_duration, tar_end), 3),
                 speed_factor=round(block_slope, 6),
-                offset=round(med_offset, 4),
-                anchor_count=len(c_indices),
-                confidence=round(c_conf, 3)
+                offset=round(fit.intercept, 4),
+                anchor_count=int(seg.indices.size),
+                confidence=round(fit.confidence, 3),
+                r_squared=round(fit.r_squared, 4),
+                inlier_ratio=round(fit.inlier_ratio, 4),
+                coverage_ratio=round(fit.coverage_ratio, 4),
+                n_buckets=int(fit.n_buckets),
+                raw_slope=round(fit.slope, 6),
             ))
-            block_id += 1
 
         return blocks
+
+    def _speed_at(self, ref_time: float, blocks: List[ContinuousBlock], default: float) -> float:
+        """
+        Broadcast speed factor of the block covering `ref_time`, or `default` when
+        no block covers it (or blocks are unavailable). Lets `build_macro_edl` use
+        the correct per-act speed for multi-speed episodes instead of one global
+        slope.
+        """
+        for b in blocks:
+            if b.ref_start - 1e-6 <= ref_time <= b.ref_end + 1e-6:
+                return b.speed_factor
+        return default
+
+    def _block_confidence(self, block_matches: List[AnchorMatch]) -> float:
+        """
+        Composite measured confidence for a block's anchor set:
+        `r^2 * inlier_ratio` of the RANSAC line through the block, falling back to
+        the mean anchor confidence when the block has too few anchors to fit.
+        """
+        if len(block_matches) < 3:
+            return float(np.mean([m.confidence for m in block_matches])) if block_matches else 0.5
+        fit = self.calibrate_global_fit(block_matches)
+        if fit.n_inliers < 2:
+            return float(np.mean([m.confidence for m in block_matches]))
+        return float(fit.confidence)
 
     def build_macro_edl(
         self,
@@ -223,7 +233,9 @@ class BlockSegmenterEngine:
                 )
             ]
 
-        # Discover global broadcast slope
+        # Discover global broadcast slope (fallback for intervals not covered by a
+        # piecewise block). Per-act speeds from the block segmentation take
+        # precedence so multi-speed episodes sync each act correctly.
         g_speed = self.calibrate_global_slope(knots)
 
         # Sanitize opening black-frame false matches (e.g. Anchor 0 falsely jumping relative to Anchor 1)
@@ -234,18 +246,30 @@ class BlockSegmenterEngine:
             if knots[0].ref_time <= 5.0 and abs(off0 - off1) > 15.0:
                 knots = knots[1:]
 
-        # Remove near-duplicate / frozen anchors (where target time barely moves < 1.0s across dr >= 8.0s)
+        # Remove near-duplicate / frozen anchors (where target time barely moves < 1.0s
+        # across dr >= 8.0s) — but ONLY when they are offset outliers. A frozen anchor
+        # whose neighbors agree on the offset (and the frozen one deviates) is a false
+        # near-duplicate frame. When the offset genuinely shifts (a real cut), the
+        # "frozen" anchor is the legitimate first anchor of the next act and is kept.
         clean_knots: List[AnchorMatch] = [knots[0]]
-        for k in knots[1:]:
+        for i in range(1, len(knots) - 1):
+            k = knots[i]
             prev = clean_knots[-1]
+            nxt = knots[i + 1]
             dr = k.ref_time - prev.ref_time
             dt = k.tar_time - prev.tar_time
             if dr >= 8.0 and dt < 1.0:
-                # Duplicate visual frame with frozen target time - replace if confidence is higher
-                if k.confidence > prev.confidence:
-                    clean_knots[-1] = k
-                continue
+                off_prev = prev.tar_time - prev.ref_time
+                off_k = k.tar_time - k.ref_time
+                off_next = nxt.tar_time - nxt.ref_time
+                # Outlier: prev and next agree, k deviates -> false duplicate.
+                if abs(off_prev - off_next) <= 1.0 and abs(off_k - off_prev) > 1.0:
+                    if k.confidence > prev.confidence:
+                        clean_knots[-1] = k
+                    continue
             clean_knots.append(k)
+        if len(knots) > 1:
+            clean_knots.append(knots[-1])
         knots = clean_knots
 
         edl: List[SegmentEDL] = []
@@ -253,7 +277,8 @@ class BlockSegmenterEngine:
 
         # --- 1. Opening Timeline Alignment (Zero False English) ---
         a0 = knots[0]
-        t0_proj = a0.tar_time - (a0.ref_time * g_speed)
+        s0 = self._speed_at(a0.ref_time, blocks, g_speed)
+        t0_proj = a0.tar_time - (a0.ref_time * s0)
 
         if t0_proj >= -0.25:
             # Foreign dub is present from the very start (e.g. 0:00 to first anchor)
@@ -266,13 +291,13 @@ class BlockSegmenterEngine:
                     ref_end=round(a0.ref_time, 3),
                     tar_start=round(tar_start, 3),
                     tar_end=round(a0.tar_time, 3),
-                    speed_factor=g_speed,
+                    speed_factor=s0,
                     confidence=a0.confidence
                 ))
                 seg_id += 1
         else:
             # Foreign version omitted the opening master logo (e.g. Amazon bumper)
-            gap_ref = abs(t0_proj) / g_speed
+            gap_ref = abs(t0_proj) / s0
             if gap_ref > 0.05:
                 edl.append(SegmentEDL(
                     seg_id=seg_id,
@@ -294,7 +319,7 @@ class BlockSegmenterEngine:
                     ref_end=round(a0.ref_time, 3),
                     tar_start=0.0,
                     tar_end=round(a0.tar_time, 3),
-                    speed_factor=g_speed,
+                    speed_factor=s0,
                     confidence=a0.confidence
                 ))
                 seg_id += 1
@@ -311,6 +336,8 @@ class BlockSegmenterEngine:
                 continue
 
             speed = dt / dr if dr > 0 else g_speed
+            # Per-act speed for this interval (block covering its midpoint).
+            sp = self._speed_at((a1.ref_time + a2.ref_time) / 2.0, blocks, g_speed)
 
             if 0.90 <= speed <= 1.10:
                 # Scenario A: Continuous Dialogue Scene
@@ -322,14 +349,14 @@ class BlockSegmenterEngine:
                     ref_end=round(a2.ref_time, 3),
                     tar_start=round(a1.tar_time, 3),
                     tar_end=round(a2.tar_time, 3),
-                    speed_factor=g_speed,
+                    speed_factor=sp,
                     confidence=min(a1.confidence, a2.confidence)
                 ))
                 seg_id += 1
 
             elif speed < 0.90:
                 # Scenario B: TV Commercial / Censored Scene Omission
-                dub_ref_len = dt / g_speed
+                dub_ref_len = dt / sp
                 cut_ref_len = dr - dub_ref_len
 
                 if dub_ref_len >= 1.0:
@@ -340,7 +367,7 @@ class BlockSegmenterEngine:
                         ref_end=round(a1.ref_time + dub_ref_len, 3),
                         tar_start=round(a1.tar_time, 3),
                         tar_end=round(a2.tar_time, 3),
-                        speed_factor=g_speed,
+                        speed_factor=sp,
                         confidence=min(a1.confidence, a2.confidence)
                     ))
                     seg_id += 1
@@ -378,9 +405,9 @@ class BlockSegmenterEngine:
                     segment_type="dub",
                     ref_start=round(a1.ref_time, 3),
                     ref_end=round(a2.ref_time, 3),
-                    tar_start=round(max(0.0, a2.tar_time - (dr * g_speed)), 3),
+                    tar_start=round(max(0.0, a2.tar_time - (dr * sp)), 3),
                     tar_end=round(a2.tar_time, 3),
-                    speed_factor=g_speed,
+                    speed_factor=sp,
                     confidence=min(a1.confidence, a2.confidence)
                 ))
                 seg_id += 1
@@ -389,17 +416,18 @@ class BlockSegmenterEngine:
         last_a = knots[-1]
         rem_r = ref_duration - last_a.ref_time
         rem_t = tar_duration - last_a.tar_time
+        s_tail = self._speed_at(last_a.ref_time, blocks, g_speed)
 
         if rem_t > 0.5:
-            avail_r = min(rem_r, rem_t / g_speed)
+            avail_r = min(rem_r, rem_t / s_tail)
             edl.append(SegmentEDL(
                 seg_id=seg_id,
                 segment_type="dub",
                 ref_start=round(last_a.ref_time, 3),
                 ref_end=round(last_a.ref_time + avail_r, 3),
                 tar_start=round(last_a.tar_time, 3),
-                tar_end=round(last_a.tar_time + (avail_r * g_speed), 3),
-                speed_factor=g_speed,
+                tar_end=round(last_a.tar_time + (avail_r * s_tail), 3),
+                speed_factor=s_tail,
                 confidence=last_a.confidence
             ))
             seg_id += 1
@@ -429,19 +457,5 @@ class BlockSegmenterEngine:
             ))
             seg_id += 1
 
-        # --- 4. Merge Adjacent Strictly Contiguous Dub Segments ---
-        compact_edl: List[SegmentEDL] = []
-        for s in edl:
-            if compact_edl and compact_edl[-1].segment_type == s.segment_type == "dub":
-                prev = compact_edl[-1]
-                # Merge only if speeds match and target endpoints are strictly contiguous (<= 0.05s)
-                if abs(prev.speed_factor - s.speed_factor) < 0.003 and abs(prev.tar_end - s.tar_start) <= 0.05:
-                    prev.ref_end = s.ref_end
-                    prev.tar_end = s.tar_end
-                    continue
-            compact_edl.append(s)
-
-        for idx, s in enumerate(compact_edl):
-            s.seg_id = idx
-
-        return compact_edl
+        # --- 4. Sanitize: micro-fallback absorption, min-dub-act, contiguity merge ---
+        return sanitize_edl(edl, self.config)
