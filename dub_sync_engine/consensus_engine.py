@@ -19,6 +19,16 @@ class MultiModalConsensusEngine:
     neural vocal cord probabilities into a joint multi-sensor alignment lattice.
     """
 
+    # Candidate speed ratios searched when estimating the global target/ref
+    # speed (target timeline length / reference timeline length). Includes the
+    # broadcast standards plus intermediate values — VFR sources (e.g. 24.17fps)
+    # rarely land exactly on a standard, so a hardcoded 0.96 assumption smears
+    # every correlation peak and starves the anchor set.
+    CANDIDATE_SPEED_RATIOS = (
+        0.90, 0.92, 0.94, 0.95, 0.96, 0.97, 0.98, 0.99,
+        1.0, 1.001, 1.01, 1.02, 1.03, 1.04, 1.05, 1.06, 1.08, 1.10,
+    )
+
     def __init__(self, config: Optional[DubSyncConfig] = None):
         self.config = config or DubSyncConfig()
         self.visual_engine = VisualAnchorEngine(self.config)
@@ -28,6 +38,47 @@ class MultiModalConsensusEngine:
         # see *why* the anchor count is what it is (e.g. visual matches found but
         # gated out vs. never found).
         self.last_diagnostics: Dict[str, Any] = {}
+
+    def _estimate_global_speed(self, env_r: np.ndarray, env_t: np.ndarray, bin_sr: float) -> float:
+        """
+        Estimate the target/ref speed ratio by correlating a central reference
+        window against the target resampled at each candidate ratio and keeping
+        the ratio that yields the strongest normalized peak.
+
+        This replaces the former hardcoded PAL assumption (24.0/25.0). A wrong
+        speed smears the cross-correlation peaks used to discover acoustic
+        anchors, which is exactly how the Hero episode collapsed to 7 weak
+        anchors.
+        """
+        ds = max(1, int(round(bin_sr / 10.0)))
+        env_r = env_r[::ds]
+        env_t = env_t[::ds]
+
+        n_r = len(env_r)
+        w0 = int(n_r * 0.35)
+        w1 = min(n_r, w0 + int(n_r * 0.30))
+        ref_win = env_r[w0:w1]
+        ref_win = ref_win - np.mean(ref_win)
+        r_norm = np.linalg.norm(ref_win)
+        if r_norm < 1e-6 or len(ref_win) < 32:
+            return 1.0
+
+        best_ratio, best_peak = 1.0, -1.0
+        for ratio in self.CANDIDATE_SPEED_RATIOS:
+            n_t2 = int(len(env_t) / ratio)
+            if n_t2 < len(ref_win):
+                continue
+            tar_scaled = scipy.signal.resample(env_t, n_t2).astype(np.float32)
+            corr = scipy.signal.correlate(tar_scaled, ref_win, mode="valid")
+            tar_sq = tar_scaled ** 2
+            cum = np.concatenate(([0.0], np.cumsum(tar_sq)))
+            L = len(ref_win)
+            norms = np.sqrt(np.maximum(cum[L:] - cum[:-L], 0.0))
+            corr_n = corr / np.maximum(r_norm * norms, 1e-8)
+            peak = float(np.max(corr_n))
+            if peak > best_peak:
+                best_peak, best_ratio = peak, ratio
+        return best_ratio
 
     def discover_consensus_anchors(
         self,
@@ -51,6 +102,7 @@ class MultiModalConsensusEngine:
             "visual_matches_gated_out": 0,
             "acoustic_candidates": 0,
             "vad_candidates": 0,
+            "estimated_speed_ratio": None,
         }
 
         # --- STEP 1: Acoustic Background Music & Speech Envelopes (Primary Master Spine) ---
@@ -81,8 +133,11 @@ class MultiModalConsensusEngine:
             env_t_ds = np.convolve(env_t, np.ones(w_smooth)/w_smooth, mode='same')[::w_smooth]
             dt = 0.020  # 20ms bins
 
-            # Standard broadcast tempo (0.960000x for PAL)
-            g_speed = 24.0 / 25.0
+            # Estimate the true speed ratio instead of assuming PAL 0.960000x.
+            # A hardcoded assumption smears the correlation peaks for VFR/non-PAL
+            # sources (the Hero case is 640x480 @ 24.17fps VFR), starving anchors.
+            g_speed = self._estimate_global_speed(env_r_ds, env_t_ds, 1.0 / dt)
+            self.last_diagnostics["estimated_speed_ratio"] = round(g_speed, 5)
             t_resampled = scipy.signal.resample(env_t_ds, int(len(env_t_ds) / g_speed))
 
             # Scan master in 15-second sliding windows with 10-second hop

@@ -2,6 +2,7 @@
 (raw visual matches found vs. gated in/out) so a forensic report can be diagnosed
 without the source videos."""
 import numpy as np
+import scipy.signal
 
 from dub_sync_engine.config import DubSyncConfig
 from dub_sync_engine.consensus_engine import MultiModalConsensusEngine
@@ -51,3 +52,17 @@ def test_visual_matches_all_gated_out_when_no_acoustic_spine(monkeypatch):
     assert d["visual_matches_gated_out"] == 2
     # No acoustic spine -> nothing admitted -> empty result.
     assert out == []
+
+
+def test_estimate_global_speed_recovers_ratio():
+    """The speed estimator must recover the true target/ref ratio (not assume
+    0.96). A VFR 24.17fps source is ~1.01, not 0.96 — a hardcoded assumption
+    smears every correlation peak."""
+    eng = MultiModalConsensusEngine(DubSyncConfig())
+    rng = np.random.default_rng(5)
+    n = 40000  # ~800s at 50Hz bin rate
+    ref = np.abs(np.cumsum(rng.standard_normal(n))).astype(np.float32)
+    for ratio, label in ((0.96, "PAL"), (1.02, "VFR-ish"), (1.0, "native")):
+        tar = scipy.signal.resample(ref, int(n * ratio)).astype(np.float32)
+        est = eng._estimate_global_speed(ref, tar, 50.0)
+        assert abs(est - ratio) < 0.02, f"{label}: est={est} ratio={ratio}"
