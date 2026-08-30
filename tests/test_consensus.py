@@ -28,7 +28,8 @@ def test_diagnostics_initialized_and_reset_on_empty():
 
 def test_visual_matches_all_gated_out_when_no_acoustic_spine(monkeypatch):
     """With raw visual matches but zero acoustic candidates, every visual match is
-    gated OUT and the diagnostic must say so (never silently claim success)."""
+    gated OUT (reduced weight) and the diagnostic must say so — the SOFT gate keeps
+    them as candidates instead of hard-rejecting, so RANSAC/DP decide."""
     eng = MultiModalConsensusEngine(DubSyncConfig())
 
     fake_matches = [
@@ -50,8 +51,11 @@ def test_visual_matches_all_gated_out_when_no_acoustic_spine(monkeypatch):
     assert d["raw_visual_matches_found"] == 2
     assert d["visual_matches_gated_in"] == 0
     assert d["visual_matches_gated_out"] == 2
-    # No acoustic spine -> nothing admitted -> empty result.
-    assert out == []
+    # Soft gate: both visual matches are kept, but at reduced weight and tagged
+    # visual_unconfirmed (not silently dropped).
+    assert len(out) == 2
+    assert all(m.source == "visual_unconfirmed" for m in out)
+    assert all(m.weight < 0.9 for m in out)
 
 
 def test_estimate_global_speed_recovers_ratio():

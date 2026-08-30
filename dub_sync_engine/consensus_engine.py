@@ -140,28 +140,38 @@ class MultiModalConsensusEngine:
             self.last_diagnostics["estimated_speed_ratio"] = round(g_speed, 5)
             t_resampled = scipy.signal.resample(env_t_ds, int(len(env_t_ds) / g_speed))
 
-            # Scan master in 15-second sliding windows with 10-second hop
-            win_len = int(12.0 / dt)
-            for sec in range(10, int(len(env_r_ds)*dt) - 15, 10):
-                f1 = int(sec / dt)
+            # Dense subsync-style scan: short windows, small hop, decimated to
+            # ~0.1s bins for speed. Weak-but-real candidates are kept with their
+            # correlation peak as a soft score/weight; RANSAC + the monotonic DP
+            # lattice (STEP 4) reject the false ones — not a hard threshold.
+            dec = max(1, int(round(0.1 / dt)))
+            env_r_scan = env_r_ds[::dec]
+            t_resampled_scan = t_resampled[::dec]
+            dt_scan = dt * dec
+
+            win_len = max(16, int(round(self.config.acoustic_anchor_window_sec / dt_scan)))
+            hop_len = max(1, int(round(self.config.acoustic_anchor_hop_sec / dt_scan)))
+            min_peak = self.config.acoustic_anchor_min_peak
+
+            for f1 in range(win_len, len(env_r_scan) - win_len, hop_len):
                 f2 = f1 + win_len
-                if f2 > len(env_r_ds): break
+                sec = f1 * dt_scan
 
-                r_slice = env_r_ds[f1:f2] - np.mean(env_r_ds[f1:f2])
+                r_slice = env_r_scan[f1:f2] - np.mean(env_r_scan[f1:f2])
                 r_norm = np.linalg.norm(r_slice)
-                if r_norm < 10.0: continue
+                if r_norm < 1e-3: continue
 
-                corr = scipy.signal.correlate(t_resampled, r_slice, mode='valid')
+                corr = scipy.signal.correlate(t_resampled_scan, r_slice, mode='valid')
                 best_lag = int(np.argmax(corr))
-                tar_t_norm = best_lag * dt
+                tar_t_norm = best_lag * dt_scan
                 tar_actual_t = tar_t_norm * g_speed
                 offset = tar_actual_t - sec
 
-                t_slice = t_resampled[best_lag : best_lag + win_len] - np.mean(t_resampled[best_lag : best_lag + win_len])
+                t_slice = t_resampled_scan[best_lag : best_lag + win_len] - np.mean(t_resampled_scan[best_lag : best_lag + win_len])
                 t_norm = np.linalg.norm(t_slice)
                 peak = corr[best_lag] / (r_norm * t_norm + 1e-8)
 
-                if peak >= self.config.min_acoustic_peak and tar_actual_t > 0:
+                if peak >= min_peak and tar_actual_t > 0:
                     candidates.append({
                         "ref_time": float(sec),
                         "tar_time": float(tar_actual_t),
@@ -184,8 +194,9 @@ class MultiModalConsensusEngine:
             p_t_s = np.convolve(p_tar, ker, mode='same')
 
             dt_vad = dt_r
-            win_frames = int(12.0 / dt_vad)
-            hop_frames = int(10.0 / dt_vad)
+            win_frames = max(16, int(round(self.config.acoustic_anchor_window_sec / dt_vad)))
+            hop_frames = max(1, int(round(self.config.acoustic_anchor_hop_sec / dt_vad)))
+            min_peak = self.config.vad_anchor_min_peak
 
             for f_ref in range(0, len(p_r_s) - win_frames, hop_frames):
                 t_ref = f_ref * dt_vad
@@ -206,7 +217,7 @@ class MultiModalConsensusEngine:
                 t_norm = np.linalg.norm(t_win[best_lag : best_lag + win_frames])
                 norm_peak = corr[best_lag] / (r_norm * t_norm + 1e-8)
 
-                if norm_peak >= self.config.min_vad_peak:
+                if norm_peak >= min_peak:
                     tar_f = s_start + best_lag
                     t_tar = tar_f * dt_vad
                     offset = t_tar - t_ref
@@ -232,11 +243,12 @@ class MultiModalConsensusEngine:
             med_offset = float(np.median(acoustic_offsets)) if acoustic_offsets else None
 
             for m in raw_visual_matches:
-                # A visual match is admitted only when confirmed by an acoustic anchor
-                # within a tight window with a consistent offset (no confidence bypass:
-                # an isolated frame match with no acoustic support is always rejected).
-                # The *strength* of that confirmation becomes a continuous weight for
-                # the downstream RANSAC fit, instead of a hard accept/reject.
+                # SOFT gate (was a hard reject): a visual match is always kept,
+                # but its confirmation *strength* becomes a continuous weight.
+                # Acoustic confirmation raises the weight; an unconfirmed visual
+                # match is admitted at a reduced weight and left for RANSAC + the
+                # monotonic DP lattice to accept or reject. Hard-rejecting was how
+                # a weak acoustic spine (re-cut music) wiped out all visual signal.
                 win = self.config.acoustic_gate_window_sec
                 off = self.config.acoustic_gate_offset_sec
                 confirming = [
@@ -249,17 +261,22 @@ class MultiModalConsensusEngine:
                 if confirming:
                     strength = max(float(c["confidence"]) for c in confirming)
                     self.last_diagnostics["visual_matches_gated_in"] += 1
-                    candidates.append({
-                        "ref_time": m.ref_time,
-                        "tar_time": m.tar_time,
-                        "offset": m.offset,
-                        "confidence": m.confidence,
-                        "weight": round(strength, 4),
-                        "source": "visual_gated",
-                        "score": m.confidence * 14.0
-                    })
+                    weight = round(min(1.0, 0.5 * m.confidence + 0.5 * strength), 4)
+                    source = "visual_gated"
                 else:
                     self.last_diagnostics["visual_matches_gated_out"] += 1
+                    weight = round(0.35 * m.confidence, 4)
+                    source = "visual_unconfirmed"
+
+                candidates.append({
+                    "ref_time": m.ref_time,
+                    "tar_time": m.tar_time,
+                    "offset": m.offset,
+                    "confidence": m.confidence,
+                    "weight": weight,
+                    "source": source,
+                    "score": m.confidence * 14.0 * max(0.2, weight),
+                })
 
         self.last_diagnostics["acoustic_candidates"] = sum(
             1 for c in candidates if c["source"] == "acoustic_music")
@@ -289,7 +306,11 @@ class MultiModalConsensusEngine:
 
                     # Broadcast Continuous Act: 0.93x <= speed <= 1.05x
                     if 0.93 <= speed <= 1.05:
-                        speed_penalty = abs(speed - 0.960) * 4.0
+                        # Penalize deviation from the *estimated* speed, not a
+                        # hardcoded 0.96 — otherwise a non-PAL source's true
+                        # speed is penalized and its anchors get dropped.
+                        ref_speed = self.last_diagnostics.get("estimated_speed_ratio") or 1.0
+                        speed_penalty = abs(speed - ref_speed) * 4.0
                         gain = ci["score"] - speed_penalty
                         if dp[j] + gain > dp[i]:
                             dp[i] = dp[j] + gain
