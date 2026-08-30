@@ -66,10 +66,17 @@ class VisualAnchorEngine:
         os.makedirs(output_dir, exist_ok=True)
         t0 = time.time()
 
-        # Build FFmpeg filter: Crop central 80% (safe zone) -> Scale to 320x180 -> Scene detection
+        # Build FFmpeg filter: Crop central 80% (safe zone) -> scale to a canonical
+        # 320x180 canvas *preserving aspect ratio* (pad with black) -> scene detect.
+        # A straight `scale=320:180` would stretch a 4:3 source to 16:9 and corrupt
+        # the perceptual hash; aspect-preserving scale + pad keeps the content
+        # geometry intact across mixed 16:9 / 4:3 sources.
         crop_pct = self.config.center_crop_ratio
         crop_filter = f"crop=iw*{crop_pct}:ih*{crop_pct}:(iw-iw*{crop_pct})/2:(ih-ih*{crop_pct})/2"
-        scale_filter = "scale=320:180"
+        scale_filter = (
+            "scale=320:180:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+            "pad=320:180:(ow-iw)/2:(oh-ih)/2:color=black"
+        )
         scene_filter = f"select='gt(scene,{self.config.scene_threshold})'"
         full_vf = f"{crop_filter},{scale_filter},{scene_filter},showinfo"
 
@@ -119,9 +126,11 @@ class VisualAnchorEngine:
                         if cropped.shape[0] > 10 and cropped.shape[1] > 10:
                             cv_img = cropped
 
-                    # Standardize to 16:9 normalized canvas
-                    cv_img = cv2.resize(cv_img, (320, 180))
-
+                    # Hash at the native (aspect-preserved) size: imagehash resizes
+                    # internally (pHash -> 32x32, dHash -> 9x8), and the color
+                    # histogram is normalized, so re-stretching to 320x180 here
+                    # would only re-introduce the aspect distortion we removed in
+                    # the FFmpeg scale.
                     pil_img = Image.fromarray(cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB))
                     p_h = imagehash.phash(pil_img)
                     d_h = imagehash.dhash(pil_img)
