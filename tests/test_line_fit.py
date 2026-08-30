@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from dub_sync_engine.line_fit import fit_ransac_line, pearson_r2, LineFit
+from dub_sync_engine.line_fit import fit_ransac_line, fit_piecewise_lines, pearson_r2, LineFit
 
 
 def _cloud(n, slope, intercept, rng, noise=0.1, lo=0.0, hi=600.0):
@@ -119,6 +119,48 @@ def test_degenerate_single_point():
     assert isinstance(fit, LineFit)
     assert fit.n_inliers == 0
     assert fit.confidence == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# idea 5: recursive piecewise refinement
+# --------------------------------------------------------------------------- #
+
+def test_piecewise_single_speed_is_one_segment():
+    rng = np.random.default_rng(10)
+    ref = np.sort(rng.uniform(0, 600, 80))
+    tar = ref + rng.normal(0, 0.1, 80)
+    segs = fit_piecewise_lines(np.c_[ref, tar], min_inlier_ratio=0.8)
+    assert len(segs) == 1
+    assert abs(segs[0].fit.slope - 1.0) < 0.01
+
+
+def test_piecewise_two_speeds_splits():
+    """A PAL act followed by a 1.0x act must split into two segments."""
+    rng = np.random.default_rng(11)
+    ref1 = np.sort(rng.uniform(0, 300, 40))
+    ref2 = np.sort(rng.uniform(300, 600, 40))
+    tar1 = 0.96 * ref1 + 0.0 + rng.normal(0, 0.1, 40)
+    tar2 = 1.00 * ref2 - 12.0 + rng.normal(0, 0.1, 40)  # offset continuity ~ 0.96*300=288 vs 300-12=288
+    pts = np.c_[np.concatenate([ref1, ref2]), np.concatenate([tar1, tar2])]
+    segs = fit_piecewise_lines(pts, min_inlier_ratio=0.8)
+    assert len(segs) == 2, f"expected 2 segments, got {len(segs)}"
+    segs.sort(key=lambda s: s.ref_start)
+    assert abs(segs[0].fit.slope - 0.96) < 0.02
+    assert abs(segs[1].fit.slope - 1.00) < 0.02
+
+
+def test_piecewise_recovers_cut_segments():
+    """A real cut (removed span) should yield two segments on the same slope."""
+    rng = np.random.default_rng(12)
+    ref1 = np.sort(rng.uniform(0, 300, 40))
+    ref2 = np.sort(rng.uniform(309, 600, 40))  # 9s removed
+    tar1 = ref1 + rng.normal(0, 0.1, 40)
+    tar2 = (ref2 - 9.0) + rng.normal(0, 0.1, 40)  # same speed, offset shifted by -9s
+    pts = np.c_[np.concatenate([ref1, ref2]), np.concatenate([tar1, tar2])]
+    segs = fit_piecewise_lines(pts, min_inlier_ratio=0.8)
+    # Both acts share slope 1.0 but differ in offset -> 2 segments.
+    assert len(segs) == 2
+    assert all(abs(s.fit.slope - 1.0) < 0.02 for s in segs)
 
 
 def test_degenerate_zero_x_variance():

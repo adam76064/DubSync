@@ -11,7 +11,7 @@ from typing import List, Dict, Tuple, Optional
 from .visual_anchors import AnchorMatch
 from .audio_splicer import SegmentEDL, sanitize_edl
 from .config import DubSyncConfig, snap_to_broadcast_speed, BROADCAST_STANDARDS
-from .line_fit import fit_ransac_line, LineFit
+from .line_fit import fit_ransac_line, fit_piecewise_lines, LineFit
 
 
 @dataclass
@@ -113,80 +113,46 @@ class BlockSegmenterEngine:
                 )
             ]
 
-        # Step 1: Discover global clock speed
-        global_slope = self.calibrate_global_slope(matches)
+        # Segment the anchor cloud into piecewise-linear acts via recursive RANSAC
+        # (subsync-style). Each act gets its own broadcast-snapped speed, so
+        # multi-speed episodes (PAL act + 1.0x act) are recovered without hand-tuned
+        # discontinuity thresholds. `discontinuity_threshold_sec` is retained for API
+        # compatibility but is superseded by the inlier-ratio split criterion.
+        pts = [[m.ref_time, m.tar_time] for m in matches]
+        weights = [getattr(m, "weight", 1.0) for m in matches]
+        segs = fit_piecewise_lines(
+            pts,
+            weights,
+            inlier_tol=self.config.ransac_inlier_tolerance_sec,
+            slope_lo=self.config.ransac_slope_lo,
+            slope_hi=self.config.ransac_slope_hi,
+            y_bounds=(0.0, tar_duration),
+            min_inlier_ratio=self.config.ransac_min_inlier_ratio,
+        )
 
-        # Step 2: Compute normalized offset for each anchor: Offset_k = tar_time - slope * ref_time
-        anchor_offsets = [
-            m.tar_time - (global_slope * m.ref_time)
-            for m in matches
-        ]
-
-        # Step 3: Cluster anchors into contiguous linear blocks
-        raw_clusters: List[List[int]] = []
-        current_cluster: List[int] = [0]
-
-        for i in range(1, len(matches)):
-            prev_idx = current_cluster[-1]
-            curr_offset = anchor_offsets[i]
-            
-            # Median offset of current cluster so far
-            cluster_offsets = [anchor_offsets[idx] for idx in current_cluster]
-            cluster_med_offset = float(np.median(cluster_offsets))
-
-            offset_diff = abs(curr_offset - cluster_med_offset)
-
-            # Also check if target time went backwards
-            tar_diff = matches[i].tar_time - matches[prev_idx].tar_time
-            ref_diff = matches[i].ref_time - matches[prev_idx].ref_time
-
-            if offset_diff <= discontinuity_threshold_sec and tar_diff > 0:
-                current_cluster.append(i)
-            else:
-                # Discontinuity / Editorial cut detected!
-                raw_clusters.append(current_cluster)
-                current_cluster = [i]
-
-        if current_cluster:
-            raw_clusters.append(current_cluster)
-
-        # Step 4: Build ContinuousBlock objects from all clusters without dropping single-anchor knots
         blocks: List[ContinuousBlock] = []
-        block_id = 0
-
-        for c_indices in raw_clusters:
-            first_m = matches[c_indices[0]]
-            last_m = matches[c_indices[-1]]
-            r_span = last_m.ref_time - first_m.ref_time
-            t_span = last_m.tar_time - first_m.tar_time
-
-            # Compute block-level independent speed slope (snapped to broadcast standards).
-            if r_span >= 6.0 and len(c_indices) >= 2:
-                raw_block_slope = t_span / r_span
-                block_slope = snap_to_broadcast_speed(raw_block_slope) if self.config.strict_speed else max(0.90, min(1.10, raw_block_slope))
-            else:
-                block_slope = global_slope
-
-            c_offsets = [anchor_offsets[idx] for idx in c_indices]
-            med_offset = float(np.median(c_offsets))
-
-            # Measured block confidence: RANSAC fit r^2 * inlier_ratio over this
-            # block's anchors (subsync-style quality metric), instead of a fuzzy
-            # mean of per-anchor confidences.
-            c_conf = self._block_confidence([matches[idx] for idx in c_indices])
+        for seg in segs:
+            fit = seg.fit
+            block_slope = (
+                snap_to_broadcast_speed(fit.slope)
+                if self.config.strict_speed else max(0.90, min(1.10, fit.slope))
+            )
+            ref_start = seg.ref_start
+            ref_end = seg.ref_end
+            tar_start = block_slope * ref_start + fit.intercept
+            tar_end = block_slope * ref_end + fit.intercept
 
             blocks.append(ContinuousBlock(
-                block_id=block_id,
-                ref_start=first_m.ref_time,
-                ref_end=last_m.ref_time,
-                tar_start=first_m.tar_time,
-                tar_end=last_m.tar_time,
+                block_id=len(blocks),
+                ref_start=round(ref_start, 3),
+                ref_end=round(ref_end, 3),
+                tar_start=round(max(0.0, tar_start), 3),
+                tar_end=round(min(tar_duration, tar_end), 3),
                 speed_factor=round(block_slope, 6),
-                offset=round(med_offset, 4),
-                anchor_count=len(c_indices),
-                confidence=round(c_conf, 3)
+                offset=round(fit.intercept, 4),
+                anchor_count=int(seg.indices.size),
+                confidence=round(fit.confidence, 3)
             ))
-            block_id += 1
 
         return blocks
 

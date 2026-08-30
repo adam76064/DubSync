@@ -16,9 +16,10 @@ matches (scattered outliers) or real cut boundaries (used elsewhere).
 
 import numpy as np
 from dataclasses import dataclass
-from typing import Optional, Tuple, Sequence
+from typing import Optional, Tuple, Sequence, List
 
-__all__ = ["LineFit", "pearson_r2", "fit_ransac_line"]
+__all__ = ["LineFit", "PiecewiseSegment", "pearson_r2", "fit_ransac_line",
+           "fit_piecewise_lines"]
 
 
 @dataclass
@@ -223,3 +224,130 @@ def fit_ransac_line(
     return LineFit(float(a), float(b), float(r2), float(inlier_ratio),
                    n_in, n, mask, confidence,
                    coverage_ratio=coverage_ratio, n_buckets=n_buckets)
+
+
+@dataclass
+class PiecewiseSegment:
+    """One contiguous piece of a piecewise-linear alignment (a macro act)."""
+
+    fit: LineFit            # line (speed ratio + offset) through this act's anchors
+    ref_start: float        # min ref_time of this act's points
+    ref_end: float          # max ref_time of this act's points
+    indices: np.ndarray     # original point indices belonging to this act
+
+
+def _best_split(x: np.ndarray, y: np.ndarray, w: np.ndarray, idx: np.ndarray):
+    """
+    Find the split of `idx` (in ref-time order) that minimizes the combined
+    weighted squared residual of two independent least-squares lines (left and
+    right halves). Returns the split position k (index into the sorted order),
+    or None if a split is not possible (fewer than 2 points per side).
+
+    This is the standard segmented-regression breakpoint estimate and is robust
+    for *contiguous* multi-speed acts (where inlier-gap heuristics fail).
+    """
+    order = np.argsort(x[idx])
+    xs = x[idx][order]
+    ys = y[idx][order]
+    ws = w[idx][order]
+
+    best_k = None
+    best_total = None
+    for k in range(2, len(order) - 1):  # need >= 2 points on each side
+        _, aL, bL = pearson_r2(xs[:k], ys[:k], ws[:k])
+        _, aR, bR = pearson_r2(xs[k:], ys[k:], ws[k:])
+        resid = (np.sum((aL * xs[:k] + bL - ys[:k]) ** 2)
+                 + np.sum((aR * xs[k:] + bR - ys[k:]) ** 2))
+        if best_total is None or resid < best_total:
+            best_total = resid
+            best_k = k
+    return best_k
+
+
+def fit_piecewise_lines(
+    points: Sequence[Sequence[float]],
+    weights: Optional[Sequence[float]] = None,
+    *,
+    inlier_tol: float = 1.0,
+    slope_lo: float = 0.85,
+    slope_hi: float = 1.15,
+    y_bounds: Optional[Tuple[float, float]] = None,
+    min_inlier_ratio: float = 0.8,
+    min_points: int = 6,
+    max_depth: int = 6,
+) -> List[PiecewiseSegment]:
+    """
+    Recursively fit piecewise-linear segments through a (ref_time, tar_time)
+    point cloud (reimplements the idea behind tympanix/subsync's recursive
+    per-sentence refinement).
+
+    Fit one line globally; if its inlier ratio is below `min_inlier_ratio`,
+    split the points at the largest gap between consecutive inliers and refit
+    each side, recursing until each segment is a clean act. Returns the leaf
+    segments sorted by ref time.
+
+    This recovers multi-speed episodes (e.g. a PAL act mixed with a 1.0x act)
+    without hand-tuned discontinuity thresholds.
+    """
+    pts = np.asarray(points, dtype=float)
+    if pts.ndim != 2 or pts.shape[1] != 2:
+        raise ValueError("points must be an (N, 2) array")
+    n = pts.shape[0]
+    if weights is None:
+        w = np.ones(n)
+    else:
+        w = np.asarray(weights, dtype=float)
+        if w.shape != (n,):
+            raise ValueError("weights must match points length")
+        w = np.maximum(w, 0.0)
+
+    x = pts[:, 0]
+    y = pts[:, 1]
+
+    def recurse(idx: np.ndarray, depth: int) -> List[PiecewiseSegment]:
+        if idx.size == 0:
+            return []
+        fit = fit_ransac_line(
+            pts[idx], w[idx],
+            inlier_tol=inlier_tol, slope_lo=slope_lo, slope_hi=slope_hi,
+            y_bounds=y_bounds,
+        )
+        # Leaf conditions: clean enough, too deep, too few points to split.
+        if (
+            fit.inlier_ratio >= min_inlier_ratio
+            or depth >= max_depth
+            or idx.size < min_points
+            or fit.n_inliers < 2
+        ):
+            return [PiecewiseSegment(
+                fit=fit,
+                ref_start=float(x[idx].min()),
+                ref_end=float(x[idx].max()),
+                indices=idx.copy(),
+            )]
+
+        k = _best_split(x, y, w, idx)
+        if k is None:
+            return [PiecewiseSegment(
+                fit=fit,
+                ref_start=float(x[idx].min()),
+                ref_end=float(x[idx].max()),
+                indices=idx.copy(),
+            )]
+
+        order = np.argsort(x[idx])
+        left = idx[order[:k]]
+        right = idx[order[k:]]
+        if left.size < 3 or right.size < 3:
+            return [PiecewiseSegment(
+                fit=fit,
+                ref_start=float(x[idx].min()),
+                ref_end=float(x[idx].max()),
+                indices=idx.copy(),
+            )]
+
+        return recurse(left, depth + 1) + recurse(right, depth + 1)
+
+    segs = recurse(np.arange(n), 0)
+    segs.sort(key=lambda s: s.ref_start)
+    return segs

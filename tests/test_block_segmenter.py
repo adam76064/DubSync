@@ -143,6 +143,57 @@ def test_anchor_match_has_weight_default():
 
 
 # --------------------------------------------------------------------------- #
+# subsync idea 5: recursive piecewise refinement in cluster_into_blocks
+# --------------------------------------------------------------------------- #
+
+def test_cluster_splits_multi_speed_episode():
+    """A PAL act + a 1.0x act must cluster into two blocks with the right speeds."""
+    import numpy as np
+    from dub_sync_engine.visual_anchors import AnchorMatch
+
+    rng = np.random.default_rng(0)
+    ref1 = np.sort(rng.uniform(0, 300, 40))
+    ref2 = np.sort(rng.uniform(300, 600, 40))
+    tar1 = 0.96 * ref1 + rng.normal(0, 0.1, 40)
+    # Act 1 ends at tar 0.96*300 = 288; act 2 continues at 288 (contiguous offset).
+    tar2 = (ref2 - 300.0) + 288.0 + rng.normal(0, 0.1, 40)  # speed 1.0, offset -12
+
+    matches = []
+    for i in range(40):
+        matches.append(AnchorMatch(i, i, round(ref1[i], 3), round(tar1[i], 3), 0, 0.9,
+                                   round(tar1[i] - ref1[i], 4)))
+    for i in range(40):
+        j = i + 40
+        matches.append(AnchorMatch(j, j, round(ref2[i], 3), round(tar2[i], 3), 0, 0.9,
+                                   round(tar2[i] - ref2[i], 4)))
+
+    eng = _engine()
+    # Act 2 runs 1.0x over ref 300..600 -> tar 288..588, so tar_duration is 588.
+    blocks = eng.cluster_into_blocks(600.0, 588.0, matches)
+    assert len(blocks) == 2, f"expected 2 blocks, got {len(blocks)}"
+    blocks.sort(key=lambda b: b.ref_start)
+    assert abs(blocks[0].speed_factor - (24.0 / 25.0)) < 0.01
+    assert abs(blocks[1].speed_factor - 1.0) < 0.01
+
+
+def test_cluster_single_speed_one_block():
+    scenario = gen.get_scenario("pal_speed")
+    eng = _engine()
+    blocks = eng.cluster_into_blocks(scenario.ref_duration, scenario.tar_duration,
+                                     scenario.make_anchors())
+    assert len(blocks) == 1
+    assert abs(blocks[0].speed_factor - (24.0 / 25.0)) < 0.01
+
+
+def test_cluster_empty_matches():
+    eng = _engine()
+    blocks = eng.cluster_into_blocks(600.0, 600.0, [])
+    assert len(blocks) == 1
+    assert blocks[0].anchor_count == 0
+    assert blocks[0].speed_factor == 1.0
+
+
+# --------------------------------------------------------------------------- #
 # Phase 3: broadcast speed locking in EDL
 # --------------------------------------------------------------------------- #
 
