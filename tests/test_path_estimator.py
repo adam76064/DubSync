@@ -87,6 +87,31 @@ def test_build_edl_marks_cut_and_tail_as_fallback(tmp_path):
     assert abs(edl[-1].ref_end - 100.0) < 0.1
 
 
+def test_pal_speed_with_cut_and_tail(tmp_path):
+    """PAL (0.96) speed + a 2s cut at 40s + tail trim at 80s must all be
+    recovered: measured speed ~0.96, two segments with slope 0.96, and the tail
+    (ref >= 80) not covered."""
+    from scipy.signal import resample
+    sr = 16000
+    ref = gen.make_distinctive_audio(120.0, sr, seed=11)
+    content = np.concatenate([ref[: 40 * sr], ref[42 * sr: 80 * sr]])  # 2s cut, tail @80
+    tar = resample(content, int(len(content) * 0.96)).astype(np.float32)  # PAL speedup
+
+    rw = str(tmp_path / "ref.wav")
+    tw = str(tmp_path / "tar.wav")
+    gen.write_wav(rw, ref, sr)
+    gen.write_wav(tw, tar, sr)
+
+    est = SyncPathEstimator(DubSyncConfig())
+    segs = est.extract_path(rw, tw, 120.0, len(tar) / sr)
+
+    assert abs(est.last_diagnostics["speed_ratio"] - 0.96) < 0.03
+    assert len(segs) == 2, f"expected 2 segments, got {len(segs)}"
+    assert all(abs(s.slope - 0.96) < 0.03 for s in segs)
+    # Tail trim: last segment ends near ref 80 (not 120).
+    assert 76.0 <= segs[-1].ref_end <= 84.0, f"tail end {segs[-1].ref_end}"
+
+
 def test_clean_episode_is_one_segment(tmp_path):
     """No cuts, no trim -> a single segment covering the whole episode."""
     sr = 16000

@@ -44,36 +44,26 @@ answer: the plan builds tooling to *measure* it.
 
 ## To-do list (ordered; each = dig deep → integrate → test → checkpoint)
 
-1. **Speed-adaptive acoustic matching** — remove the hardcoded `g_speed =
-   24.0/25.0` in `consensus_engine` STEP 1; resample the target over a grid of
-   broadcast/ratio candidates (reuse the drift profiler's `CANDIDATE_SPEED_RATIOS`
-   idea) and correlate per ratio. Expected to recover most of the acoustic
-   anchors *and* report the measured speed ratio.
-2. **Dense anchor generation** — shorten the acoustic scan window (12 s → 2–5 s)
-   and hop (10 s → 0.5–1 s); keep candidates above a *low* threshold with soft
-   scores instead of hard `min_acoustic_peak = 0.50` rejection. Same treatment
-   for VAD (align dense probability curves, not just `min_vad_peak = 0.55` bursts).
-3. **Soft acoustic gate** — replace the hard visual-reject gate (`acoustic_gate_window_sec`
-   / `acoustic_gate_offset_sec`) with a continuous confirmation *weight*; let
-   RANSAC + the monotonic DP lattice drop bad matches instead of discarding all
-   unconfirmed visuals.
-4. **Dense similarity matrix + ridge/path extraction** — the core "measure the
-   truth" piece. Build a coarse ref×tar similarity matrix (~1 s resolution) from
-   spectral/envelope/VAD features; extract ridge segments (= continuous alignment
-   paths) and the jumps between them (= cuts). This reveals cut positions, tail
-   trim, *and* speed in one shot, resolving the 140.93 s discrepancy.
-5. **Resolution-invariant visual matching** — downscale both sources to a
-   canonical resolution (e.g. 320×180) before hashing; use the target's actual
-   PTS (not frame index) for VFR. Restores the most trustworthy anchor type for
-   pinning non-cut regions.
-6. **Cut/tail-aware EDL output** — wire the measured path into the block
-   segmentation so a mid-episode cut + tail trim produce multiple blocks (and
-   fallback segments), not one continuous block. Keep the existing tail-trim
-   logic; add explicit cut-step handling.
-7. **Validation** — synthetic fixtures modeling the Hero structure (1–2 s cut at
-   min 2, ~40 s tail trim, optional PAL/NTSC speed) must be recovered: correct
-   segment count, cut position within tolerance, measured speed, and fallback
-   spans only where content is genuinely absent. Full suite green at every step.
+1. **Speed-adaptive acoustic matching** ✅ `checkpoint-recut-1` — `_estimate_global_speed`
+   grid-search replaces the hardcoded `g_speed = 24.0/25.0`; result stored in
+   `last_diagnostics['estimated_speed_ratio']`.
+2. **Dense anchor generation** ✅ `checkpoint-recut-2` — acoustic scan decimated to
+   ~0.1s bins with short windows / small hop and a low soft threshold
+   (`acoustic_anchor_min_peak=0.20`); VAD densified the same way.
+3. **Soft acoustic gate** ✅ `checkpoint-recut-2` — unconfirmed visual matches kept
+   at reduced weight (`visual_unconfirmed`) instead of hard-rejected.
+4. **Dense similarity matrix + ridge/path extraction** ✅ `checkpoint-recut-4` —
+   `dub_sync_engine/path_estimator.py`: multi-band M&E spectral fingerprint +
+   dense point cloud + offset-step cut detection + coarse-to-fine refinement +
+   seam completion.
+5. **Resolution-invariant visual matching** ✅ `checkpoint-recut-5` — aspect-preserving
+   scale (`force_original_aspect_ratio` + pad) and native-aspect hashing (PTS was
+   already VFR-safe).
+6. **Cut/tail-aware EDL output** ✅ `checkpoint-recut-6` — `SyncPathEstimator.build_edl()`
+   + pipeline `path` strategy + sparse-anchor (< 10) fallback; `sync_path_segments`
+   + `path_diagnostics` in the forensic payload.
+7. **Validation** ✅ `checkpoint-recut-7` — synthetic re-cut / PAL+cut+tail / clean
+   fixtures recovered; 70 tests green.
 
 ## Ground rules
 
@@ -103,13 +93,34 @@ answer: the plan builds tooling to *measure* it.
 
 ## Open questions (to resolve during dig-deeps)
 
-1. Is the ~100 s discrepancy speed, more trims, or both? (The matrix/ridge
-   measurement answers this — no manual guess.)
-2. What exact acoustic/VAD window size + hop best balances density vs. uniqueness
-   for cartoon/music-heavy dubs? (Prototype on synthetic fixtures first.)
-3. Ridge extraction details: 1-D vs 2-D peaks, minimum segment length, jump
-   penalty, and how to surface multiple ridges as "cuts" in the report.
+1. Is the ~100 s discrepancy speed, more trims, or both? → *Answered by the
+   estimator: `path_diagnostics.speed_ratio` measures it directly; the
+   discrepancy was speed (VFR 24.17fps ≈ non-standard ratio), not just trims.*
+2. What window/hop balances density vs. uniqueness? → *15 s window / 2 s hop
+   proved the robust default: shorter windows sharpen cuts but let tail garbage
+   leak past the correlation floor. Cut localization is ~one window (~6 s gap),
+   which is conservative (safe) rather than mis-synced.*
+3. Ridge extraction details → *Implemented as offset-step change-point detection
+   (before/after median) over the dense point cloud, plus coarse-to-fine
+   boundary refinement and seam completion using known media durations.*
 
 ## Deep dives
 
-*(Filled in per idea during implementation, as in `SUBSYNC_INTEGRATION_PLAN.md`.)*
+### Idea 4 — dense path estimator (`path_estimator.py`)
+
+- **Feature:** a single M&E energy envelope is too weak (repetitive music
+  false-matches everywhere — reproduced with `make_cartoon_audio`, whose 0.8s
+  percussive hits + pentatonic scale are periodic). An **8-band log-spaced
+  spectral fingerprint** (300–3900 Hz, 10 Hz) is distinctive enough that windows
+  correlate sharply only at their true position.
+- **Cuts are offset steps, not slope changes.** A 1–2 s cut over a 30 s span
+  looks like a shallow slope (0.93) to a residual-based line splitter, so
+  `fit_piecewise_lines` never splits. Offset-step change-point detection
+  (before/after median) is the correct model.
+- **Seam completion:** windowed correlation blurs boundaries by ~window_sec.
+  Using the known media durations, the first/last segments are extended to the
+  true boundaries (intro gap / tail trim) exactly — the tail trim is the target
+  running out, not a correlation drop.
+- **Validation on `make_distinctive_audio`** (random-chord cells): re-cut (2 s
+  cut + tail) → 2 segments, correct offsets, tail not covered; PAL 0.96 + cut +
+  tail → speed recovered, 2 segments, tail exact.
