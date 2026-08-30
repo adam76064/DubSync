@@ -91,14 +91,17 @@ class DubSyncConfig:
     # --- Acoustic Gate & Micro-Chopping Guards ---
     min_acoustic_peak: float = 0.50   # Min normalized M&E correlation peak to accept an acoustic anchor
     min_vad_peak: float = 0.55        # Min normalized speech-probability correlation to accept a VAD anchor
-    # Dense acoustic anchor discovery (subsync-style point cloud): short windows,
-    # small hop, and a *low* acceptance threshold so weak-but-real candidates are
-    # kept with soft scores (their correlation peak becomes the RANSAC weight).
-    # Geometry (RANSAC + monotonic DP) — not a hard threshold — rejects the false ones.
-    acoustic_anchor_window_sec: float = 5.0   # Ref window length for acoustic candidates
-    acoustic_anchor_hop_sec: float = 1.0      # Hop between adjacent acoustic probe windows
-    acoustic_anchor_min_peak: float = 0.20    # Low soft threshold (was hard min_acoustic_peak=0.50)
-    vad_anchor_min_peak: float = 0.20         # Low soft threshold for VAD candidates
+    # Acoustic anchor discovery. IMPORTANT: these must stay LONG and STRICT.
+    # Short windows (5s) + a low threshold (0.20) made repetitive cartoon/music
+    # beds false-match at scale (18 anchors collapsing onto one 6s loop in the
+    # Hero episode), flooding the RANSAC fit with garbage. A long window is
+    # unique enough to reject a repeated phrase; a high threshold keeps only
+    # genuinely distinct matches. Density comes from the *path estimator*, not
+    # from loosening these.
+    acoustic_anchor_window_sec: float = 12.0  # Ref window length for acoustic candidates
+    acoustic_anchor_hop_sec: float = 10.0     # Hop between adjacent acoustic probe windows
+    acoustic_anchor_min_peak: float = 0.50    # Strict threshold (repetitive beds false-match below this)
+    vad_anchor_min_peak: float = 0.55         # Strict threshold for VAD candidates
     min_dub_act_sec: float = 5.0      # A dub fragment shorter than this (between fallbacks) is ambient noise
     micro_fallback_merge_sec: float = 0.5  # Merge fallback gaps shorter than this into the neighboring dub
     acoustic_gate_window_sec: float = 4.0  # +/- window (s) around an acoustic anchor for visual confirmation

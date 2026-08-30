@@ -179,16 +179,24 @@ class DubSyncPipeline:
                         visual_matches,
                         discontinuity_threshold_sec=self.config.discontinuity_threshold_sec
                     )
-                    
+                    # Anchor-fit quality gate: the block segmentation is only
+                    # trustworthy when the anchors actually lie on a consistent
+                    # line. With repetitive music the acoustic matcher floods
+                    # the fit with false matches (low inlier ratio), so a low
+                    # composite confidence means "measure the path instead of
+                    # trusting these anchors" — regardless of anchor count.
+                    gfit = self.block_segmenter.calibrate_global_fit(visual_matches) if visual_matches else None
+                    anchor_quality = gfit.confidence if gfit is not None else 0.0
+
                     if len(blocks) == 1 and blocks[0].anchor_count == 0 and strategy != "blocks":
                         console.print("  [bold yellow][!][/bold yellow] Zero macro anchors found. Activating [bold cyan]Neural DTW Speech Warping[/bold cyan]...")
                         edl = self.vad_engine.compute_neural_dtw_edl(ref_wav, tar_wav, ref_info.duration, tar_info.duration)
                         console.print(f"  [bold green][OK][/bold green] [bold cyan]Neural DTW[/bold cyan] constructed [bold green]{len(edl)} continuous dialogue nodes[/bold green].")
-                    elif len(visual_matches) < 10 and strategy != "blocks":
-                        # Sparse anchors: block segmentation collapses to one
-                        # continuous block and cannot see a mid-episode cut or a
-                        # tail trim. Measure the true path directly instead.
-                        console.print(f"  [bold yellow][!][/bold yellow] Only {len(visual_matches)} anchors survived — too sparse for block segmentation. Measuring the dense sync path...")
+                    elif strategy != "blocks" and (len(visual_matches) < 10 or anchor_quality < 0.5):
+                        # Sparse OR low-quality anchors: block segmentation can't
+                        # see cuts/tail trims reliably. Measure the true path
+                        # directly from the M&E fingerprint.
+                        console.print(f"  [bold yellow][!][/bold yellow] Anchor fit quality {anchor_quality:.3f} ({len(visual_matches)} anchors) — too weak for block segmentation. Measuring the dense sync path...")
                         path_segments = self.path_estimator.extract_path(ref_wav, tar_wav, ref_info.duration, tar_info.duration)
                         if path_segments:
                             edl = self.path_estimator.build_edl(path_segments, ref_info.duration, tar_info.duration)

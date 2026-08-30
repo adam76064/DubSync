@@ -112,6 +112,39 @@ def test_pal_speed_with_cut_and_tail(tmp_path):
     assert 76.0 <= segs[-1].ref_end <= 84.0, f"tail end {segs[-1].ref_end}"
 
 
+def test_config_defaults_are_strict_not_loose():
+    """Regression guard for the Hero failure: the acoustic-anchor thresholds must
+    stay long/strict. Loosening them (0.2 threshold, 5s window) let repetitive
+    music flood the RANSAC fit with false matches (18 anchors collapsing onto one
+    ~6s loop), and the flood then bypassed the path-estimator fallback."""
+    cfg = DubSyncConfig()
+    assert cfg.acoustic_anchor_window_sec >= 10.0, "window must stay long (unique)"
+    assert cfg.acoustic_anchor_min_peak >= 0.4, "threshold must stay strict"
+    assert cfg.acoustic_anchor_hop_sec >= 5.0, "hop must not over-densify"
+    assert cfg.path_min_correlation >= 0.4, "path estimator keeps a strict floor"
+
+
+def test_unrelated_audio_does_not_yield_confident_false_path(tmp_path):
+    """Truly unrelated audio must not produce a confident full-coverage alignment.
+    The path estimator's strict correlation floor should reject the false matches
+    that a loose short-window scan would accept (the Hero false-match collapse)."""
+    sr = 16000
+    ref = gen.make_cartoon_audio(100.0, sr, seed=5)
+    tar = gen.make_cartoon_audio(100.0, sr, seed=99)  # unrelated content
+    rw = str(tmp_path / "ref.wav")
+    tw = str(tmp_path / "tar.wav")
+    gen.write_wav(rw, ref, sr)
+    gen.write_wav(tw, tar, sr)
+
+    est = SyncPathEstimator(DubSyncConfig())
+    segs = est.extract_path(rw, tw, 100.0, 100.0)
+
+    # No segment may claim high confidence across most of the episode — that
+    # would be a confident lie on unrelated audio.
+    for s in segs:
+        assert s.confidence < 0.9, f"confident false path: {s}"
+
+
 def test_clean_episode_is_one_segment(tmp_path):
     """No cuts, no trim -> a single segment covering the whole episode."""
     sr = 16000
