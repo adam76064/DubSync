@@ -101,6 +101,7 @@ class MultiModalConsensusEngine:
                         "tar_time": float(tar_actual_t),
                         "offset": float(offset),
                         "confidence": float(peak),
+                        "weight": float(peak),  # continuous confirmation strength
                         "source": "acoustic_music",
                         "score": float(peak) * 14.0
                     })
@@ -148,6 +149,7 @@ class MultiModalConsensusEngine:
                         "tar_time": float(t_tar),
                         "offset": float(offset),
                         "confidence": min(1.0, float(norm_peak)),
+                        "weight": min(1.0, float(norm_peak)),  # continuous confirmation strength
                         "source": "vad_speech",
                         "score": float(norm_peak) * 11.0
                     })
@@ -163,22 +165,28 @@ class MultiModalConsensusEngine:
             med_offset = float(np.median(acoustic_offsets)) if acoustic_offsets else None
 
             for m in raw_visual_matches:
-                # A visual match is accepted only if confirmed by an acoustic anchor
-                # within a tight window with a consistent offset. No confidence bypass:
-                # an isolated frame match with no acoustic support is always rejected.
+                # A visual match is admitted only when confirmed by an acoustic anchor
+                # within a tight window with a consistent offset (no confidence bypass:
+                # an isolated frame match with no acoustic support is always rejected).
+                # The *strength* of that confirmation becomes a continuous weight for
+                # the downstream RANSAC fit, instead of a hard accept/reject.
                 win = self.config.acoustic_gate_window_sec
                 off = self.config.acoustic_gate_offset_sec
-                is_acoustically_confirmed = any(
-                    abs(m.ref_time - c["ref_time"]) <= win and abs(m.offset - c["offset"]) <= off
-                    for c in candidates if c["source"] in ["acoustic_music", "vad_speech"]
-                )
+                confirming = [
+                    c for c in candidates
+                    if c["source"] in ["acoustic_music", "vad_speech"]
+                    and abs(m.ref_time - c["ref_time"]) <= win
+                    and abs(m.offset - c["offset"]) <= off
+                ]
 
-                if is_acoustically_confirmed:
+                if confirming:
+                    strength = max(float(c["confidence"]) for c in confirming)
                     candidates.append({
                         "ref_time": m.ref_time,
                         "tar_time": m.tar_time,
                         "offset": m.offset,
                         "confidence": m.confidence,
+                        "weight": round(strength, 4),
                         "source": "visual_gated",
                         "score": m.confidence * 14.0
                     })
@@ -234,7 +242,8 @@ class MultiModalConsensusEngine:
                 tar_time=round(c["tar_time"], 3),
                 hash_dist=0,
                 confidence=round(c["confidence"], 3),
-                offset=round(c["offset"], 4)
+                offset=round(c["offset"], 4),
+                weight=round(float(c.get("weight", 1.0)), 4)
             ))
             curr = parent[curr]
             idx += 1

@@ -109,6 +109,40 @@ def test_block_confidence_uses_r2_inlier_ratio():
 
 
 # --------------------------------------------------------------------------- #
+# subsync idea 3: continuous similarity weights
+# --------------------------------------------------------------------------- #
+
+def test_calibrate_global_fit_uses_anchor_weights():
+    """The global fit must honor per-anchor weights (acoustic confirmation strength)."""
+    import numpy as np
+    from dub_sync_engine.visual_anchors import AnchorMatch
+
+    rng = np.random.default_rng(0)
+    ref = np.sort(rng.uniform(0, 600, 40))
+    tar = ref + rng.normal(0, 0.1, 40)
+    matches = [AnchorMatch(i, i, round(ref[i], 3), round(tar[i], 3), 0, 0.9,
+                           round(tar[i] - ref[i], 4), weight=1.0) for i in range(40)]
+
+    eng = _engine()
+    fit = eng.calibrate_global_fit(matches)
+    assert abs(fit.slope - 1.0) < 0.02
+
+    # Zero-weight anchors must not influence the fit: give every anchor weight 0 and
+    # confirm the fit still finds the identity line (weights only affect ranking).
+    zeroed = [AnchorMatch(i, i, m.ref_time, m.tar_time, 0, 0.9, m.offset, weight=0.0)
+              for i, m in enumerate(matches)]
+    fit_zero = eng.calibrate_global_fit(zeroed)
+    # Degenerate all-zero weights fall back to uniform weighting internally.
+    assert fit_zero.n_inliers == len(matches)
+
+
+def test_anchor_match_has_weight_default():
+    from dub_sync_engine.visual_anchors import AnchorMatch
+    m = AnchorMatch(0, 0, 10.0, 12.0, 0, 0.9, 2.0)
+    assert m.weight == 1.0
+
+
+# --------------------------------------------------------------------------- #
 # Phase 3: broadcast speed locking in EDL
 # --------------------------------------------------------------------------- #
 

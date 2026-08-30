@@ -39,6 +39,7 @@ class AnchorMatch:
     confidence: float
     offset: float  # tar_time - ref_time
     seq_len: int = 1  # number of consecutive cut matches verified (N-gram rhythm)
+    weight: float = 1.0  # continuous confirmation strength (acoustic × N-gram); feeds RANSAC fit
 
 
 class VisualAnchorEngine:

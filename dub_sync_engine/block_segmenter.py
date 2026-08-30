@@ -59,6 +59,8 @@ class BlockSegmenterEngine:
             return LineFit(1.0, 0.0, 0.0, 0.0, 0, 0, np.zeros(0, dtype=bool), 0.0)
 
         pts = np.array([[m.ref_time, m.tar_time] for m in matches], dtype=float)
+        if weights is None:
+            weights = [getattr(m, "weight", 1.0) for m in matches]
         return fit_ransac_line(
             pts,
             weights=weights,
