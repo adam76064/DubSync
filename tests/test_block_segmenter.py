@@ -63,6 +63,52 @@ def test_calibrate_global_slope_micro_trim():
 
 
 # --------------------------------------------------------------------------- #
+# subsync idea 2: measured confidence (r^2 * inlier_ratio)
+# --------------------------------------------------------------------------- #
+
+def test_calibrate_global_fit_returns_measured_confidence():
+    """The global fit exposes r^2 and inlier_ratio (not a fuzzy number)."""
+    scenario = gen.get_scenario("pal_speed")
+    eng = _engine()
+    fit = eng.calibrate_global_fit(scenario.make_anchors())
+    assert fit.n_total > 0
+    assert fit.inlier_ratio == 1.0, "clean act: every anchor is an inlier"
+    assert fit.r_squared > 0.99
+    assert abs(fit.confidence - 1.0) < 0.02
+
+
+def test_block_confidence_penalizes_outliers():
+    """A block containing planted false anchors gets a lower measured confidence."""
+    import numpy as np
+    from dub_sync_engine.visual_anchors import AnchorMatch
+
+    rng = np.random.default_rng(0)
+    ref = np.sort(rng.uniform(0, 600, 50))
+    tar = 0.96 * ref + 2.0
+    clean = [AnchorMatch(i, i, round(ref[i], 3), round(tar[i], 3), 0, 0.9, round(tar[i] - ref[i], 4))
+             for i in range(50)]
+
+    eng = _engine()
+    clean_conf = eng._block_confidence(clean)
+
+    # Add 8 false anchors scattered far off the line.
+    bad = clean + [AnchorMatch(1000 + i, 1000 + i, round(rng.uniform(0, 600), 3),
+                               round(rng.uniform(0, 600), 3), 0, 0.9, 0.0) for i in range(8)]
+    dirty_conf = eng._block_confidence(bad)
+
+    assert clean_conf > 0.95
+    assert dirty_conf < clean_conf, f"{dirty_conf} !< {clean_conf}"
+
+
+def test_block_confidence_uses_r2_inlier_ratio():
+    """confidence == r^2 * inlier_ratio for a well-populated block."""
+    scenario = gen.get_scenario("clean_1x")
+    eng = _engine()
+    fit = eng.calibrate_global_fit(scenario.make_anchors())
+    assert abs(fit.confidence - (fit.r_squared * fit.inlier_ratio)) < 1e-9
+
+
+# --------------------------------------------------------------------------- #
 # Phase 3: broadcast speed locking in EDL
 # --------------------------------------------------------------------------- #
 

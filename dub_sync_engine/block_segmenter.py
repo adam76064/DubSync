@@ -11,6 +11,7 @@ from typing import List, Dict, Tuple, Optional
 from .visual_anchors import AnchorMatch
 from .audio_splicer import SegmentEDL, sanitize_edl
 from .config import DubSyncConfig, snap_to_broadcast_speed, BROADCAST_STANDARDS
+from .line_fit import fit_ransac_line, LineFit
 
 
 @dataclass
@@ -40,54 +41,46 @@ class BlockSegmenterEngine:
     def __init__(self, config: DubSyncConfig):
         self.config = config
 
+    def calibrate_global_fit(
+        self,
+        matches: List[AnchorMatch],
+        weights: Optional[List[float]] = None,
+    ) -> LineFit:
+        """
+        Robustly fit the dominant global line `tar = slope * ref + intercept`
+        through the anchor cloud using RANSAC (see `line_fit.fit_ransac_line`).
+
+        Unlike the legacy histogram-peak estimator, RANSAC discards scattered
+        false matches and cross-cut intervals automatically and returns a
+        *measured* confidence (r^2 * inlier_ratio). The slope is the speed ratio;
+        the intercept is the global offset.
+        """
+        if not matches:
+            return LineFit(1.0, 0.0, 0.0, 0.0, 0, 0, np.zeros(0, dtype=bool), 0.0)
+
+        pts = np.array([[m.ref_time, m.tar_time] for m in matches], dtype=float)
+        return fit_ransac_line(
+            pts,
+            weights=weights,
+            inlier_tol=self.config.ransac_inlier_tolerance_sec,
+            slope_lo=self.config.ransac_slope_lo,
+            slope_hi=self.config.ransac_slope_hi,
+        )
+
     def calibrate_global_slope(self, matches: List[AnchorMatch]) -> float:
         """
-        Calculates the robust global playback clock speed ratio (m = d(tar) / d(ref))
-        across all *continuous* anchor segments.
+        Global playback clock speed ratio via robust RANSAC line fitting, snapped
+        to a broadcast standard.
 
-        Cut-aware: intervals that cross a real editorial cut are discarded (they are
-        the one pairwise slope per cut and would otherwise drag the estimate). The
-        remaining slopes are combined via a length-weighted histogram peak — not an
-        arithmetic median — so long continuous acts dominate and a minority of
-        micro-trim intervals cannot skew the result. The result is snapped to a
-        broadcast standard.
+        This replaces the former length-weighted histogram-peak estimator with the
+        subsync-style RANSAC fit: it discards scattered false anchors and
+        cross-cut intervals (which the histogram had to pre-filter by hand) and is
+        immune to a minority of micro-trim intervals.
         """
-        if len(matches) < 2:
+        fit = self.calibrate_global_fit(matches)
+        if fit.n_inliers < 2:
             return 1.0
-
-        slopes: List[float] = []
-        weights: List[float] = []
-        for i in range(len(matches) - 1):
-            m1 = matches[i]
-            m2 = matches[i + 1]
-
-            dt_r = m2.ref_time - m1.ref_time
-            dt_t = m2.tar_time - m1.tar_time
-
-            # Only consider intervals long enough to avoid frame quantization noise.
-            if dt_r < 3.0 or dt_t < 3.0:
-                continue
-
-            s = dt_t / dt_r
-
-            # Discard intervals that cross a real cut/trim. Continuous acts run at a
-            # broadcast speed in [0.94, 1.06]; anything outside is a discontinuity.
-            if not (0.94 <= s <= 1.06):
-                continue
-
-            slopes.append(s)
-            weights.append(dt_r)
-
-        if not slopes:
-            return 1.0
-
-        # Length-weighted histogram peak over the realistic speed range.
-        hist, edges = np.histogram(
-            slopes, bins=200, range=(0.94, 1.06), weights=weights
-        )
-        raw = float(edges[int(np.argmax(hist))])
-
-        return snap_to_broadcast_speed(raw)
+        return snap_to_broadcast_speed(fit.slope)
 
     def cluster_into_blocks(
         self,
@@ -172,7 +165,11 @@ class BlockSegmenterEngine:
 
             c_offsets = [anchor_offsets[idx] for idx in c_indices]
             med_offset = float(np.median(c_offsets))
-            c_conf = float(np.mean([matches[idx].confidence for idx in c_indices]))
+
+            # Measured block confidence: RANSAC fit r^2 * inlier_ratio over this
+            # block's anchors (subsync-style quality metric), instead of a fuzzy
+            # mean of per-anchor confidences.
+            c_conf = self._block_confidence([matches[idx] for idx in c_indices])
 
             blocks.append(ContinuousBlock(
                 block_id=block_id,
@@ -188,6 +185,19 @@ class BlockSegmenterEngine:
             block_id += 1
 
         return blocks
+
+    def _block_confidence(self, block_matches: List[AnchorMatch]) -> float:
+        """
+        Composite measured confidence for a block's anchor set:
+        `r^2 * inlier_ratio` of the RANSAC line through the block, falling back to
+        the mean anchor confidence when the block has too few anchors to fit.
+        """
+        if len(block_matches) < 3:
+            return float(np.mean([m.confidence for m in block_matches])) if block_matches else 0.5
+        fit = self.calibrate_global_fit(block_matches)
+        if fit.n_inliers < 2:
+            return float(np.mean([m.confidence for m in block_matches]))
+        return float(fit.confidence)
 
     def build_macro_edl(
         self,

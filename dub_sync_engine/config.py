@@ -95,6 +95,14 @@ class DubSyncConfig:
     micro_fallback_merge_sec: float = 0.5  # Merge fallback gaps shorter than this into the neighboring dub
     acoustic_gate_window_sec: float = 4.0  # +/- window (s) around an acoustic anchor for visual confirmation
     acoustic_gate_offset_sec: float = 2.0  # Max allowed |delta offset| between visual & acoustic anchors
+
+    # --- RANSAC Global Line Fit (subsync-style) ---
+    ransac_inlier_tolerance_sec: float = 1.0  # Perpendicular distance (s) within which an anchor is an inlier
+    ransac_slope_lo: float = 0.85   # Min allowed speed ratio for the global line
+    ransac_slope_hi: float = 1.15   # Max allowed speed ratio for the global line
+    ransac_min_inlier_ratio: float = 0.80  # Coverage target for a single global line (below -> recursive split)
+    ransac_coverage_bucket_sec: float = 60.0  # Ref-time bucket size for the coverage constraint
+    ransac_min_coverage_buckets: int = 3     # Min distinct ref-time buckets the inliers must span
     
     # --- Output Codec & Container ---
     audio_codec: str = "aac"
