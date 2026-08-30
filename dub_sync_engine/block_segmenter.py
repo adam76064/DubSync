@@ -120,13 +120,16 @@ class BlockSegmenterEngine:
         # compatibility but is superseded by the inlier-ratio split criterion.
         pts = [[m.ref_time, m.tar_time] for m in matches]
         weights = [getattr(m, "weight", 1.0) for m in matches]
+        # No y_bounds here: a hard target-timeline bound rejects legitimate lines
+        # whose opening offset is negative (logo gaps) whenever a false/outlier
+        # anchor sits at ref=0. RANSAC inlier counting + the broadcast slope band
+        # already reject nonsense lines; the offset is constrained by the anchors.
         segs = fit_piecewise_lines(
             pts,
             weights,
             inlier_tol=self.config.ransac_inlier_tolerance_sec,
             slope_lo=self.config.ransac_slope_lo,
             slope_hi=self.config.ransac_slope_hi,
-            y_bounds=(0.0, tar_duration),
             min_inlier_ratio=self.config.ransac_min_inlier_ratio,
         )
 
@@ -155,6 +158,18 @@ class BlockSegmenterEngine:
             ))
 
         return blocks
+
+    def _speed_at(self, ref_time: float, blocks: List[ContinuousBlock], default: float) -> float:
+        """
+        Broadcast speed factor of the block covering `ref_time`, or `default` when
+        no block covers it (or blocks are unavailable). Lets `build_macro_edl` use
+        the correct per-act speed for multi-speed episodes instead of one global
+        slope.
+        """
+        for b in blocks:
+            if b.ref_start - 1e-6 <= ref_time <= b.ref_end + 1e-6:
+                return b.speed_factor
+        return default
 
     def _block_confidence(self, block_matches: List[AnchorMatch]) -> float:
         """
@@ -205,7 +220,9 @@ class BlockSegmenterEngine:
                 )
             ]
 
-        # Discover global broadcast slope
+        # Discover global broadcast slope (fallback for intervals not covered by a
+        # piecewise block). Per-act speeds from the block segmentation take
+        # precedence so multi-speed episodes sync each act correctly.
         g_speed = self.calibrate_global_slope(knots)
 
         # Sanitize opening black-frame false matches (e.g. Anchor 0 falsely jumping relative to Anchor 1)
@@ -247,7 +264,8 @@ class BlockSegmenterEngine:
 
         # --- 1. Opening Timeline Alignment (Zero False English) ---
         a0 = knots[0]
-        t0_proj = a0.tar_time - (a0.ref_time * g_speed)
+        s0 = self._speed_at(a0.ref_time, blocks, g_speed)
+        t0_proj = a0.tar_time - (a0.ref_time * s0)
 
         if t0_proj >= -0.25:
             # Foreign dub is present from the very start (e.g. 0:00 to first anchor)
@@ -260,13 +278,13 @@ class BlockSegmenterEngine:
                     ref_end=round(a0.ref_time, 3),
                     tar_start=round(tar_start, 3),
                     tar_end=round(a0.tar_time, 3),
-                    speed_factor=g_speed,
+                    speed_factor=s0,
                     confidence=a0.confidence
                 ))
                 seg_id += 1
         else:
             # Foreign version omitted the opening master logo (e.g. Amazon bumper)
-            gap_ref = abs(t0_proj) / g_speed
+            gap_ref = abs(t0_proj) / s0
             if gap_ref > 0.05:
                 edl.append(SegmentEDL(
                     seg_id=seg_id,
@@ -288,7 +306,7 @@ class BlockSegmenterEngine:
                     ref_end=round(a0.ref_time, 3),
                     tar_start=0.0,
                     tar_end=round(a0.tar_time, 3),
-                    speed_factor=g_speed,
+                    speed_factor=s0,
                     confidence=a0.confidence
                 ))
                 seg_id += 1
@@ -305,6 +323,8 @@ class BlockSegmenterEngine:
                 continue
 
             speed = dt / dr if dr > 0 else g_speed
+            # Per-act speed for this interval (block covering its midpoint).
+            sp = self._speed_at((a1.ref_time + a2.ref_time) / 2.0, blocks, g_speed)
 
             if 0.90 <= speed <= 1.10:
                 # Scenario A: Continuous Dialogue Scene
@@ -316,14 +336,14 @@ class BlockSegmenterEngine:
                     ref_end=round(a2.ref_time, 3),
                     tar_start=round(a1.tar_time, 3),
                     tar_end=round(a2.tar_time, 3),
-                    speed_factor=g_speed,
+                    speed_factor=sp,
                     confidence=min(a1.confidence, a2.confidence)
                 ))
                 seg_id += 1
 
             elif speed < 0.90:
                 # Scenario B: TV Commercial / Censored Scene Omission
-                dub_ref_len = dt / g_speed
+                dub_ref_len = dt / sp
                 cut_ref_len = dr - dub_ref_len
 
                 if dub_ref_len >= 1.0:
@@ -334,7 +354,7 @@ class BlockSegmenterEngine:
                         ref_end=round(a1.ref_time + dub_ref_len, 3),
                         tar_start=round(a1.tar_time, 3),
                         tar_end=round(a2.tar_time, 3),
-                        speed_factor=g_speed,
+                        speed_factor=sp,
                         confidence=min(a1.confidence, a2.confidence)
                     ))
                     seg_id += 1
@@ -372,9 +392,9 @@ class BlockSegmenterEngine:
                     segment_type="dub",
                     ref_start=round(a1.ref_time, 3),
                     ref_end=round(a2.ref_time, 3),
-                    tar_start=round(max(0.0, a2.tar_time - (dr * g_speed)), 3),
+                    tar_start=round(max(0.0, a2.tar_time - (dr * sp)), 3),
                     tar_end=round(a2.tar_time, 3),
-                    speed_factor=g_speed,
+                    speed_factor=sp,
                     confidence=min(a1.confidence, a2.confidence)
                 ))
                 seg_id += 1
@@ -383,17 +403,18 @@ class BlockSegmenterEngine:
         last_a = knots[-1]
         rem_r = ref_duration - last_a.ref_time
         rem_t = tar_duration - last_a.tar_time
+        s_tail = self._speed_at(last_a.ref_time, blocks, g_speed)
 
         if rem_t > 0.5:
-            avail_r = min(rem_r, rem_t / g_speed)
+            avail_r = min(rem_r, rem_t / s_tail)
             edl.append(SegmentEDL(
                 seg_id=seg_id,
                 segment_type="dub",
                 ref_start=round(last_a.ref_time, 3),
                 ref_end=round(last_a.ref_time + avail_r, 3),
                 tar_start=round(last_a.tar_time, 3),
-                tar_end=round(last_a.tar_time + (avail_r * g_speed), 3),
-                speed_factor=g_speed,
+                tar_end=round(last_a.tar_time + (avail_r * s_tail), 3),
+                speed_factor=s_tail,
                 confidence=last_a.confidence
             ))
             seg_id += 1

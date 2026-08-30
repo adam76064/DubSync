@@ -193,6 +193,35 @@ def test_cluster_empty_matches():
     assert blocks[0].speed_factor == 1.0
 
 
+def test_multispeed_edl_uses_per_act_speeds():
+    """The EDL must apply each act's own speed (PAL act + 1.0x act), not one global."""
+    import numpy as np
+    from dub_sync_engine.visual_anchors import AnchorMatch
+
+    rng = np.random.default_rng(0)
+    ref1 = np.sort(rng.uniform(0, 300, 40))
+    ref2 = np.sort(rng.uniform(300, 600, 40))
+    tar1 = 0.96 * ref1 + rng.normal(0, 0.1, 40)
+    tar2 = (ref2 - 300.0) + 288.0 + rng.normal(0, 0.1, 40)
+
+    matches = [AnchorMatch(i, i, round(ref1[i], 3), round(tar1[i], 3), 0, 0.9,
+                           round(tar1[i] - ref1[i], 4)) for i in range(40)]
+    matches += [AnchorMatch(i + 40, i + 40, round(ref2[i], 3), round(tar2[i], 3), 0, 0.9,
+                            round(tar2[i] - ref2[i], 4)) for i in range(40)]
+
+    eng = _engine()
+    blocks = eng.cluster_into_blocks(600.0, 588.0, matches)
+    edl = eng.build_macro_edl(600.0, 588.0, blocks, matches)
+
+    dubs = _dubs(edl)
+    speeds = sorted({round(s.speed_factor, 6) for s in dubs})
+    assert abs(speeds[0] - (24.0 / 25.0)) < 0.01, f"first act speed {speeds}"
+    assert abs(speeds[1] - 1.0) < 0.01, f"second act speed {speeds}"
+    # No drift: EDL spans full ref range and target ends at 588.
+    assert abs(dubs[-1].ref_end - 600.0) < 0.5
+    assert abs(dubs[-1].tar_end - 588.0) < 0.5
+
+
 # --------------------------------------------------------------------------- #
 # Phase 3: broadcast speed locking in EDL
 # --------------------------------------------------------------------------- #
