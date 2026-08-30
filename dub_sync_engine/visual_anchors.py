@@ -40,6 +40,9 @@ class AnchorMatch:
     offset: float  # tar_time - ref_time
     seq_len: int = 1  # number of consecutive cut matches verified (N-gram rhythm)
     weight: float = 1.0  # continuous confirmation strength (acoustic × N-gram); feeds RANSAC fit
+    source: str = "unknown"  # modality that produced this anchor (acoustic_music/vad_speech/visual_gated/visual/orb/spectral/vad)
+    acoustic_shift_ms: float = 0.0  # sub-ms acoustic refinement applied to this anchor
+    acoustic_confidence: float = 1.0  # normalized acoustic cross-correlation peak at refinement
 
 
 class VisualAnchorEngine:
@@ -273,7 +276,8 @@ class VisualAnchorEngine:
                 hash_dist=c["hash_dist"],
                 confidence=round(c["confidence"], 3),
                 offset=round(c["offset"], 4),
-                seq_len=c["seq_len"]
+                seq_len=c["seq_len"],
+                source="visual"
             )
             chain.append(match)
             curr = parent[curr]

@@ -136,6 +136,17 @@ class ForensicReportGenerator:
         return json_path, md_path
 
     @staticmethod
+    def _fmt_time(sec: float, fps: Optional[float] = None) -> str:
+        """Format seconds as `m:ss.mmm` (optionally with a frame number)."""
+        if sec is None:
+            return "-"
+        sec = float(sec)
+        s = f"{int(sec // 60)}:{int(sec % 60):02d}.{int(round((sec % 1) * 1000)):03d}"
+        if fps:
+            s += f" (#{int(round(sec * fps))})"
+        return s
+
+    @staticmethod
     def _build_markdown(data: Dict[str, Any]) -> str:
         cfg = data.get("pipeline_configuration", {})
         media = data.get("media_specs", {})
@@ -145,13 +156,67 @@ class ForensicReportGenerator:
         gaps = data.get("omitted_censored_gaps", [])
         summary = data.get("quality_summary", {})
         audit = data.get("verifier_audit", {})
+        diag = data.get("diagnostics", {})
+        anomalies = diag.get("anomalies", [])
+        global_fit = diag.get("global_fit")
+        source_breakdown = matching.get("source_breakdown", diag.get("source_breakdown", {}))
 
-        md = []
+        md: List[str] = []
         md.append(f"# DubSync Pro — Comprehensive Forensic Diagnostic Report\n")
-        md.append(f"**Generated:** {data.get('timestamp', 'N/A')} | **Processing Time:** {data.get('execution_time_sec', 0):.2f}s | **Engine Version:** {data.get('dub_sync_version', 'v2.2.0')}\n")
+        md.append(f"**Generated:** {data.get('timestamp', 'N/A')} | "
+                  f"**Schema:** v{data.get('schema_version', '1.0')} | "
+                  f"**Engine:** {data.get('dub_sync_version', 'v2.2.0')} | "
+                  f"**Processing:** {data.get('execution_time_sec', 0):.2f}s\n")
         md.append("---\n")
 
-        # Media Specs
+        # ────────────────────────────────────────────────────────────────
+        # 0. Diagnostics — anomaly / flaw analysis (front and center)
+        # ────────────────────────────────────────────────────────────────
+        md.append("## 0. Diagnostics — Anomaly & Flaw Analysis\n")
+        if anomalies:
+            md.append(f"**{len(anomalies)} potential flaw(s) auto-flagged.** Review these first.\n")
+            md.append("| Severity | Type | Ref Time | Signal | Detail |")
+            md.append("| :--- | :--- | :--- | :--- | :--- |")
+            for a in anomalies:
+                t = a.get("ref_time", a.get("ref_start", a.get("block_id", "-")))
+                if isinstance(t, float):
+                    t = ForensicReportGenerator._fmt_time(t)
+                sig = ""
+                for key in ("offset_jump_sec", "local_speed", "r_squared", "confidence",
+                            "error_ms", "correlation", "acoustic_confidence"):
+                    if key in a:
+                        sig += f"{key}={a[key]} "
+                md.append(f"| {a.get('severity', 'unknown')} | `{a.get('type')}` | {t} | `{sig.strip()}` | {a.get('detail', '')} |")
+        else:
+            md.append("*No anomalies detected — the sync ran clean.*")
+        md.append("")
+
+        if global_fit:
+            md.append("### Global RANSAC Fit Summary\n")
+            md.append("| Metric | Value |")
+            md.append("| :--- | :--- |")
+            md.append(f"| Raw slope (speed ratio) | {global_fit.get('raw_slope'):.6f} |")
+            md.append(f"| Snapped slope (broadcast) | {global_fit.get('snapped_slope'):.6f} |")
+            md.append(f"| Intercept (global offset) | {global_fit.get('intercept'):+.4f}s |")
+            md.append(f"| Pearson r² | {global_fit.get('r_squared'):.4f} |")
+            md.append(f"| Inlier ratio | {global_fit.get('inlier_ratio'):.4f} ({global_fit.get('n_inliers')}/{global_fit.get('n_total')}) |")
+            md.append(f"| Coverage ratio | {global_fit.get('coverage_ratio'):.4f} ({global_fit.get('n_buckets')} buckets) |")
+            md.append(f"| Composite confidence | {global_fit.get('confidence'):.4f} |")
+            md.append("")
+
+        if source_breakdown:
+            md.append("### Anchor Source Breakdown\n")
+            md.append("| Source | Count |")
+            md.append("| :--- | :--- |")
+            for src, cnt in sorted(source_breakdown.items(), key=lambda kv: -kv[1]):
+                md.append(f"| `{src}` | {cnt} |")
+            md.append("")
+
+        md.append("---\n")
+
+        # ────────────────────────────────────────────────────────────────
+        # 1. Media specs
+        # ────────────────────────────────────────────────────────────────
         md.append("## 1. Media Ingestion Specifications\n")
         ref_v = media.get("ref_video", {})
         tar_v = media.get("tar_video", {})
@@ -160,21 +225,30 @@ class ForensicReportGenerator:
 
         md.append("| Stream | Reference (HQ Master) | Target (Foreign Dub) | Delta / Notes |")
         md.append("| :--- | :--- | :--- | :--- |")
-        md.append(f"| **File** | `{media.get('ref_filename')}` | `{media.get('tar_filename')}` | - |")
-        md.append(f"| **Duration** | {media.get('ref_duration_sec'):.3f}s ({int(media.get('ref_duration_sec', 0)//60)}m {int(media.get('ref_duration_sec', 0)%60):02d}s) | {media.get('tar_duration_sec'):.3f}s ({int(media.get('tar_duration_sec', 0)//60)}m {int(media.get('tar_duration_sec', 0)%60):02d}s) | {media.get('duration_delta_sec'):+.3f}s |")
-        md.append(f"| **Video** | {ref_v.get('resolution')} @ {ref_v.get('fps'):.3f}fps ({ref_v.get('codec')}) | {tar_v.get('resolution')} @ {tar_v.get('fps'):.3f}fps ({tar_v.get('codec')}) | FPS Ratio: {ref_v.get('fps', 24.0)/max(0.01, tar_v.get('fps', 25.0)):.4f} |")
-        md.append(f"| **Audio** | {ref_a.get('codec')} {ref_a.get('sample_rate')}Hz ({ref_a.get('channels')}ch, {ref_a.get('lang')}) | {tar_a.get('codec')} {tar_a.get('sample_rate')}Hz ({tar_a.get('channels')}ch, {tar_a.get('lang')}) | Internal Resample: 48,000Hz PCM |")
+        ref_dur = media.get("ref_duration_sec", 0.0) or 0.0
+        tar_dur = media.get("tar_duration_sec", 0.0) or 0.0
+        delta = media.get("duration_delta_sec", 0.0) or 0.0
+        ref_fps = (ref_v.get("fps") or 24.0)
+        tar_fps = (tar_v.get("fps") or 25.0)
+        md.append(f"| **File** | `{media.get('ref_filename', 'N/A')}` | `{media.get('tar_filename', 'N/A')}` | - |")
+        md.append(f"| **Duration** | {ref_dur:.3f}s ({int(ref_dur//60)}m {int(ref_dur%60):02d}s) | {tar_dur:.3f}s ({int(tar_dur//60)}m {int(tar_dur%60):02d}s) | {delta:+.3f}s |")
+        md.append(f"| **Video** | {ref_v.get('resolution', 'N/A')} @ {ref_fps:.3f}fps ({ref_v.get('codec', 'N/A')}) | {tar_v.get('resolution', 'N/A')} @ {tar_fps:.3f}fps ({tar_v.get('codec', 'N/A')}) | FPS Ratio: {ref_fps/max(0.01, tar_fps):.4f} |")
+        md.append(f"| **Audio** | {ref_a.get('codec', 'N/A')} {ref_a.get('sample_rate', '?')}Hz ({ref_a.get('channels', '?')}ch, {ref_a.get('lang', '?')}) | {tar_a.get('codec', 'N/A')} {tar_a.get('sample_rate', '?')}Hz ({tar_a.get('channels', '?')}ch, {tar_a.get('lang', '?')}) | Internal Resample: 48,000Hz PCM |")
         md.append("\n---\n")
 
-        # Pipeline Configuration
+        # ────────────────────────────────────────────────────────────────
+        # 2. Pipeline configuration
+        # ────────────────────────────────────────────────────────────────
         md.append("## 2. Active Pipeline Configuration & Variables\n")
-        md.append("| Variable / Parameter | Configured Value | Description |")
-        md.append("| :--- | :--- | :--- |")
-        for k, v in cfg.items():
-            md.append(f"| `{k}` | `{v}` | - |")
+        md.append("| Variable / Parameter | Configured Value |")
+        md.append("| :--- | :--- |")
+        for k in sorted(cfg.keys()):
+            md.append(f"| `{k}` | `{cfg[k]}` |")
         md.append("\n---\n")
 
-        # Matching Telemetry
+        # ────────────────────────────────────────────────────────────────
+        # 3. Anchor registry
+        # ────────────────────────────────────────────────────────────────
         md.append("## 3. Multi-Modal Alignment & Complete Anchor Registry\n")
         md.append(f"* **Active Strategy:** `{cfg.get('strategy', 'hybrid')}` | **Matcher Mode:** `{matching.get('active_mode')}`")
         md.append(f"* **Cascade Selection:** `{matching.get('cascade_tier_selected')}`")
@@ -183,58 +257,59 @@ class ForensicReportGenerator:
 
         raw_anchors = matching.get("anchors", [])
         if raw_anchors:
-            # Calculate global calibrated speed from blocks if available
-            g_speed = blocks[0].get("speed_factor", 1.0) if blocks else 1.0
-            first_offset = raw_anchors[0].get("offset", 0.0)
-
-            md.append("### Complete Chronological Anchor Registry Table\n")
-            md.append("| # | Ref Time (mm:ss / Frame) | Tar Time (mm:ss / Frame) | Measured Offset | Expected Offset (at speed) | Local Drift | Confidence / Hash |")
-            md.append("| :--- | :--- | :--- | :--- | :--- | :--- | :--- |")
-            
             r_fps = ref_v.get('fps', 24.0)
-            t_fps = tar_v.get('fps', 25.0)
-
-            for idx, a in enumerate(raw_anchors):
-                r_t = a['ref_time']
-                t_t = a['tar_time']
-                r_f = int(r_t * r_fps)
-                t_f = int(t_t * t_fps)
-                r_str = f"{int(r_t//60)}:{int(r_t%60):02d}.{int((r_t%1)*1000):03d} (`#{r_f}`)"
-                t_str = f"{int(t_t//60)}:{int(t_t%60):02d}.{int((t_t%1)*1000):03d} (`#{t_f}`)"
-                
-                exp_offset = first_offset - (r_t * (1.0 - g_speed))
-                drift = a['offset'] - exp_offset
-                drift_str = f"**{drift:+6.3f}s**" if abs(drift) > 0.40 else f"{drift:+6.3f}s"
-                
-                md.append(f"| {idx+1} | {r_t:7.3f}s ({r_str}) | {t_t:7.3f}s ({t_str}) | {a['offset']:+7.4f}s | {exp_offset:+7.4f}s | {drift_str} | {a.get('confidence', 1.0)*100:.1f}% ({a.get('metrics', '')}) |")
+            md.append("### Complete Chronological Anchor Registry Table\n")
+            md.append("| # | Ref Time | Tar Time | Offset | Local Speed →next | Offset Jump →next | Source | Weight | Seq | Ac.Shift | Ac.Conf | Conf |")
+            md.append("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |")
+            for a in raw_anchors:
+                ls = a.get("local_speed_to_next")
+                ls_s = f"{ls:.4f}" if ls is not None else "-"
+                oj = a.get("offset_jump_to_next")
+                oj_s = f"**{oj:+.3f}**" if oj is not None and abs(oj) > 2.0 else (f"{oj:+.3f}" if oj is not None else "-")
+                md.append(
+                    f"| {a.get('index', '?')} | {ForensicReportGenerator._fmt_time(a.get('ref_time'), r_fps)} | "
+                    f"{ForensicReportGenerator._fmt_time(a.get('tar_time'))} | {a.get('offset', 0):+.3f}s | "
+                    f"{ls_s} | {oj_s} | `{a.get('source', 'unknown')}` | {a.get('weight', 1.0):.2f} | "
+                    f"{a.get('seq_len', 1)} | {a.get('acoustic_shift_ms', 0):+.1f}ms | {a.get('acoustic_confidence', 1.0):.2f} | "
+                    f"{a.get('confidence', 1.0) * 100:.0f}% |"
+                )
             md.append("\n---\n")
 
-        # Continuous Macro-Blocks
+        # ────────────────────────────────────────────────────────────────
+        # 4. Continuous macro-blocks
+        # ────────────────────────────────────────────────────────────────
         md.append("## 4. Continuous Macro-Blocks & Independent Speed Slopes\n")
         if blocks:
-            md.append("| Block # | Ref Start ➔ End | Ref Duration | Tar Start ➔ End | Tar Duration | Calibrated Speed | Net Offset | Keypoints |")
-            md.append("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |")
+            md.append("| Block | Ref Span | Tar Span | Speed | Raw Slope | Offset | r² | Inliers | Coverage | Anchors | Conf |")
+            md.append("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |")
             for b in blocks:
-                r_d = b['ref_end'] - b['ref_start']
-                t_d = b['tar_end'] - b['tar_start']
-                r_span_str = f"{int(b['ref_start']//60)}:{int(b['ref_start']%60):02d} ➔ {int(b['ref_end']//60)}:{int(b['ref_end']%60):02d}"
-                t_span_str = f"{int(b['tar_start']//60)}:{int(b['tar_start']%60):02d} ➔ {int(b['tar_end']//60)}:{int(b['tar_end']%60):02d}"
-                md.append(f"| **Block #{b['block_id']}** | {b['ref_start']:.2f}s ➔ {b['ref_end']:.2f}s ({r_span_str}) | {r_d:.2f}s | {b['tar_start']:.2f}s ➔ {b['tar_end']:.2f}s ({t_span_str}) | {t_d:.2f}s | **{b['speed_factor']:.6f}x** | {b['offset']:+.4f}s | {b['anchor_count']} anchors |")
+                r_span = f"{ForensicReportGenerator._fmt_time(b.get('ref_start'))} ➔ {ForensicReportGenerator._fmt_time(b.get('ref_end'))}"
+                t_span = f"{ForensicReportGenerator._fmt_time(b.get('tar_start'))} ➔ {ForensicReportGenerator._fmt_time(b.get('tar_end'))}"
+                inl = f"{b.get('inlier_ratio', 0):.2f}"
+                md.append(
+                    f"| **#{b.get('block_id')}** | {r_span} | {t_span} | **{b.get('speed_factor', 1.0):.6f}x** | "
+                    f"{b.get('raw_slope', 0):.6f} | {b.get('offset', 0):+.4f}s | {b.get('r_squared', 0):.3f} | "
+                    f"{inl} | {b.get('coverage_ratio', 1.0):.2f} ({b.get('n_buckets', 0)}b) | {b.get('anchor_count', 0)} | {b.get('confidence', 0) * 100:.0f}% |"
+                )
             md.append("\n---\n")
 
-        # Detected Omissions / Censored Scenes
+        # ────────────────────────────────────────────────────────────────
+        # 5. Omissions / censored scenes
+        # ────────────────────────────────────────────────────────────────
         md.append("## 5. Detected Omitted / Censored Scenes (Bridged Gaps)\n")
         if gaps:
-            md.append("| Cut # | Master Ref Interval | Missing Duration | Bridge Treatment |")
-            md.append("| :--- | :--- | :--- | :--- |")
+            md.append("| Cut # | Master Ref Interval | Missing Duration | Target Position | Bridge Treatment |")
+            md.append("| :--- | :--- | :--- | :--- | :--- |")
             for i, g in enumerate(gaps):
-                cut_span_str = f"{int(g['start_time']//60)}:{int(g['start_time']%60):02d} ➔ {int(g['end_time']//60)}:{int(g['end_time']%60):02d}"
-                md.append(f"| **Cut #{i+1}** | {g['start_time']:.2f}s ➔ {g['end_time']:.2f}s ({cut_span_str}) | **{g['duration']:.2f}s** | Vocal-Filtered Ambient M&E Bridge |")
+                cut_span = f"{ForensicReportGenerator._fmt_time(g.get('start_time'))} ➔ {ForensicReportGenerator._fmt_time(g.get('end_time'))}"
+                md.append(f"| **Cut #{i+1}** | {cut_span} | **{g.get('duration', 0):.2f}s** | {ForensicReportGenerator._fmt_time(g.get('tar_time'))} | Vocal-Filtered Ambient M&E Bridge |")
         else:
             md.append("*No omitted or censored scene gaps detected — audio remained continuous throughout the timeline.*")
         md.append("\n---\n")
 
-        # Final Timeline EDL
+        # ────────────────────────────────────────────────────────────────
+        # 6. Timeline EDL
+        # ────────────────────────────────────────────────────────────────
         md.append("## 6. Complete Final Render Edit Decision List (EDL)\n")
         md.append("| Seg # | Type | Master Ref Interval (Duration) | Foreign Dub Slice (Input Dur) | Speed Ratio | Audio Filter Executed |")
         md.append("| :--- | :--- | :--- | :--- | :--- | :--- |")
@@ -251,17 +326,40 @@ class ForensicReportGenerator:
             md.append(f"| {s['seg_id']} | {s_type} | {r_span} | {t_span} | {s['speed_factor']:.6f}x | {filt} |")
         md.append("\n---\n")
 
-        # Closed Loop Verification Audit
+        # ────────────────────────────────────────────────────────────────
+        # 7. Closed-loop verification audit
+        # ────────────────────────────────────────────────────────────────
+        md.append("## 7. Closed-Loop Auto-Verification Audit Scorecard\n")
         if audit:
-            md.append("## 7. Closed-Loop Auto-Verification Audit Scorecard\n")
             md.append(f"* **Probed Audit Windows:** {audit.get('total_probed_windows', 0)}")
             md.append(f"* **Timeline Verification Coverage:** {audit.get('passed_windows_pct', 100.0):.1f}%")
             md.append(f"* **Mean Alignment Error:** `{audit.get('mean_alignment_error_ms', 0):.1f} ms`")
             md.append(f"* **Max Peak Error:** `{audit.get('max_alignment_error_ms', 0):.1f} ms`")
             md.append(f"* **Healed False Fallbacks:** **{audit.get('false_fallbacks_healed_count', 0)} gaps** ({audit.get('healed_duration_sec', 0):.1f}s of continuous dub preserved)\n")
-            md.append("\n---\n")
 
-        # Quality Summary
+            audit_log = audit.get("audit_log", [])
+            if audit_log:
+                md.append("### Per-Window Audit Log\n")
+                md.append("| Ref Start | Ref End | Action | Error (ms) | Correlation | Detail |")
+                md.append("| :--- | :--- | :--- | :--- | :--- | :--- |")
+                for rec in audit_log:
+                    detail = ""
+                    if rec.get("action") == "HEALED_FALSE_FALLBACK":
+                        detail = f"healed {rec.get('healed_duration', 0):.1f}s, lag={rec.get('lag_samples', 0)}"
+                    elif rec.get("action") == "CONFIRMED_GENUINE_CUT":
+                        detail = f"duration={rec.get('duration', 0):.1f}s"
+                    err = rec.get("error_ms")
+                    err_s = f"{err:.1f}" if err is not None else "-"
+                    corr = rec.get("correlation")
+                    corr_s = f"{corr:.3f}" if corr is not None else "-"
+                    md.append(f"| {ForensicReportGenerator._fmt_time(rec.get('ref_start'))} | {ForensicReportGenerator._fmt_time(rec.get('ref_end'))} | `{rec.get('action')}` | {err_s} | {corr_s} | {detail} |")
+        else:
+            md.append("*Auto-verification was disabled for this run — no audit data collected.*")
+        md.append("\n---\n")
+
+        # ────────────────────────────────────────────────────────────────
+        # 8. Quality summary
+        # ────────────────────────────────────────────────────────────────
         md.append("## 8. Quality Control & Execution Summary\n")
         md.append(f"* **Output Master MKV:** `{data.get('output_filename')}`")
         md.append(f"* **Dub Segments Rendered:** {summary.get('dub_segments_count', 0)}")

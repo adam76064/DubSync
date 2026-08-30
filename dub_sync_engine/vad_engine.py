@@ -189,7 +189,8 @@ class SileroVADEngine:
                 tar_time=round(c["tar_time"], 3),
                 hash_dist=0,
                 confidence=round(c["confidence"], 3),
-                offset=round(c["offset"], 4)
+                offset=round(c["offset"], 4),
+                source="vad"
             ))
             curr = parent[curr]
             idx += 1

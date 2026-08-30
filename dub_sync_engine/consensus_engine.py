@@ -243,7 +243,8 @@ class MultiModalConsensusEngine:
                 hash_dist=0,
                 confidence=round(c["confidence"], 3),
                 offset=round(c["offset"], 4),
-                weight=round(float(c.get("weight", 1.0)), 4)
+                weight=round(float(c.get("weight", 1.0)), 4),
+                source=c.get("source", "unknown")
             ))
             curr = parent[curr]
             idx += 1

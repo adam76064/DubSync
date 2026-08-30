@@ -147,7 +147,8 @@ class SpectralFingerprintEngine:
                 tar_time=c["tar_time"],
                 hash_dist=0,
                 confidence=round(c["confidence"], 3),
-                offset=round(c["offset"], 4)
+                offset=round(c["offset"], 4),
+                source="spectral"
             ))
             curr = parent[curr]
             idx += 1

@@ -8,11 +8,11 @@ import time
 import tempfile
 import shutil
 from dataclasses import asdict
-from typing import Optional, Callable
+from typing import Optional, Callable, Dict, List
 
 from rich.console import Console
 
-from .config import DubSyncConfig
+from .config import DubSyncConfig, snap_to_broadcast_speed
 from .media_probe import MediaProbe, MediaInfo
 from .visual_anchors import VisualAnchorEngine, AnchorMatch
 from .block_segmenter import BlockSegmenterEngine, ContinuousBlock
@@ -143,9 +143,14 @@ class DubSyncPipeline:
                             tar_idx=i,
                             ref_time=r.ref_time,
                             tar_time=r.tar_time,
-                            hash_dist=0,
+                            hash_dist=r.hash_dist,
                             confidence=round(r.combined_confidence, 3),
                             offset=round(r.tar_time - r.ref_time, 4),
+                            seq_len=r.seq_len,
+                            weight=r.weight,
+                            source=r.source,
+                            acoustic_shift_ms=r.acoustic_offset_ms,
+                            acoustic_confidence=r.acoustic_confidence,
                         )
                         for i, r in enumerate(refined)
                     ]
@@ -198,31 +203,62 @@ class DubSyncPipeline:
             total_elapsed = time.time() - start_time
 
             # --- STAGE 7: Comprehensive Forensic Telemetry Export ---
+            # Build rich, structured telemetry so a diagnostic report can be fully
+            # understood offline (no access to the source videos required).
+
             blocks_data = [
                 {
                     "block_id": b.block_id,
                     "ref_start": round(b.ref_start, 3),
                     "ref_end": round(b.ref_end, 3),
+                    "ref_duration": round(b.ref_duration, 3),
                     "tar_start": round(b.tar_start, 3),
                     "tar_end": round(b.tar_end, 3),
+                    "tar_duration": round(b.tar_duration, 3),
                     "speed_factor": round(b.speed_factor, 6),
+                    "raw_slope": round(b.raw_slope, 6),
                     "offset": round(b.offset, 4),
                     "anchor_count": b.anchor_count,
-                    "confidence": round(b.confidence, 3)
+                    "confidence": round(b.confidence, 3),
+                    "r_squared": round(b.r_squared, 4),
+                    "inlier_ratio": round(b.inlier_ratio, 4),
+                    "coverage_ratio": round(b.coverage_ratio, 4),
+                    "n_buckets": b.n_buckets,
                 }
                 for b in (blocks if 'blocks' in locals() else [])
             ]
 
-            anchors_data = [
-                {
+            anchors_data = []
+            source_breakdown: Dict[str, int] = {}
+            for i, m in enumerate(visual_matches):
+                src = getattr(m, "source", "unknown")
+                source_breakdown[src] = source_breakdown.get(src, 0) + 1
+
+                nxt = visual_matches[i + 1] if i + 1 < len(visual_matches) else None
+                if nxt is not None:
+                    dr = nxt.ref_time - m.ref_time
+                    dt = nxt.tar_time - m.tar_time
+                    local_speed = round(dt / dr, 6) if dr > 1e-6 else None
+                    offset_jump = round(nxt.offset - m.offset, 4)
+                else:
+                    local_speed = None
+                    offset_jump = None
+
+                anchors_data.append({
+                    "index": i,
                     "ref_time": round(m.ref_time, 3),
                     "tar_time": round(m.tar_time, 3),
                     "offset": round(m.offset, 4),
                     "confidence": round(m.confidence, 3),
-                    "metrics": f"hash_dist={m.hash_dist} seq_len={m.seq_len}"
-                }
-                for m in visual_matches
-            ]
+                    "weight": round(getattr(m, "weight", 1.0), 4),
+                    "source": src,
+                    "seq_len": getattr(m, "seq_len", 1),
+                    "hash_dist": m.hash_dist,
+                    "acoustic_shift_ms": round(getattr(m, "acoustic_shift_ms", 0.0), 2),
+                    "acoustic_confidence": round(getattr(m, "acoustic_confidence", 1.0), 3),
+                    "local_speed_to_next": local_speed,
+                    "offset_jump_to_next": offset_jump,
+                })
 
             edl_data = [
                 {
@@ -244,27 +280,114 @@ class DubSyncPipeline:
                 {
                     "start_time": round(s.ref_start, 2),
                     "end_time": round(s.ref_end, 2),
-                    "duration": round(s.ref_duration, 2)
+                    "duration": round(s.ref_duration, 2),
+                    "tar_time": round(s.tar_start, 2)
                 }
                 for s in edl if s.segment_type == "fallback"
             ]
 
+            # --- Diagnostics: measured signals + automatically-flagged anomalies ---
+            gfit = self.block_segmenter.calibrate_global_fit(visual_matches) if visual_matches else None
+            global_fit_summary = None
+            if gfit is not None:
+                global_fit_summary = {
+                    "raw_slope": round(gfit.slope, 6),
+                    "snapped_slope": round(snap_to_broadcast_speed(gfit.slope), 6),
+                    "intercept": round(gfit.intercept, 4),
+                    "r_squared": round(gfit.r_squared, 4),
+                    "inlier_ratio": round(gfit.inlier_ratio, 4),
+                    "coverage_ratio": round(gfit.coverage_ratio, 4),
+                    "n_buckets": int(gfit.n_buckets),
+                    "n_inliers": int(gfit.n_inliers),
+                    "n_total": int(gfit.n_total),
+                    "confidence": round(gfit.confidence, 4),
+                }
+
+            audit_obj = locals().get("audit")
+            anomalies: List[dict] = []
+            # 1. Anchor offset jumps -> candidate cuts / false-anchor teleports.
+            for a in anchors_data:
+                if a["offset_jump_to_next"] is not None and abs(a["offset_jump_to_next"]) > 2.0:
+                    anomalies.append({
+                        "type": "offset_jump",
+                        "severity": "high",
+                        "ref_time": a["ref_time"],
+                        "offset_jump_sec": a["offset_jump_to_next"],
+                        "detail": "Large |tar-ref| offset change between consecutive anchors: candidate editorial cut or a false/teleported anchor.",
+                    })
+            # 2. Local speeds off the broadcast band -> cut or drift.
+            for a in anchors_data:
+                if a["local_speed_to_next"] is not None and not (0.90 <= a["local_speed_to_next"] <= 1.10):
+                    anomalies.append({
+                        "type": "local_speed_out_of_range",
+                        "severity": "medium",
+                        "ref_time": a["ref_time"],
+                        "local_speed": a["local_speed_to_next"],
+                        "detail": "Per-interval speed outside the broadcast band [0.90, 1.10]: likely a real cut or a misplaced anchor.",
+                    })
+            # 3. Weak acoustic support on visual anchors.
+            for a in anchors_data:
+                if a["source"] in ("visual", "visual_gated") and a["acoustic_confidence"] < 0.5:
+                    anomalies.append({
+                        "type": "weak_acoustic_support",
+                        "severity": "low",
+                        "ref_time": a["ref_time"],
+                        "acoustic_confidence": a["acoustic_confidence"],
+                        "detail": "Visual anchor with poor acoustic confirmation at refinement: could be a soft-cut or a false visual match.",
+                    })
+            # 4. Low-confidence / weak-fit blocks.
+            for b in blocks_data:
+                if b["confidence"] < 0.5:
+                    anomalies.append({
+                        "type": "low_confidence_block",
+                        "severity": "high",
+                        "block_id": b["block_id"],
+                        "confidence": b["confidence"],
+                        "detail": "Block with low measured fit confidence (r^2 * inlier_ratio * coverage): weak anchor support.",
+                    })
+                if b["r_squared"] < 0.7 and b["anchor_count"] >= 3:
+                    anomalies.append({
+                        "type": "weak_block_fit",
+                        "severity": "medium",
+                        "block_id": b["block_id"],
+                        "r_squared": b["r_squared"],
+                        "detail": "Block line fit has low Pearson r^2: anchors deviate from a single speed line (drift or mixed speeds).",
+                    })
+            # 5. Misaligned verifier windows.
+            if audit_obj is not None and hasattr(audit_obj, "audit_log"):
+                for rec in audit_obj.audit_log:
+                    if rec.get("action") == "VERIFIED_ALIGNMENT" and abs(rec.get("error_ms", 0)) > 40.0:
+                        anomalies.append({
+                            "type": "misaligned_window",
+                            "severity": "high",
+                            "ref_start": rec.get("ref_start"),
+                            "error_ms": rec.get("error_ms"),
+                            "correlation": rec.get("correlation"),
+                            "detail": "Closed-loop verification window with residual alignment error > 40ms (one 24fps frame).",
+                        })
+
+            diagnostics = {
+                "global_fit": global_fit_summary,
+                "source_breakdown": source_breakdown,
+                "anchor_count": len(anchors_data),
+                "block_count": len(blocks_data),
+                "anomaly_count": len(anomalies),
+                "anomalies": anomalies,
+            }
+
+            # Full config, with Enums serialized to their value.
+            config_data = {
+                k: (v.value if hasattr(v, "value") else v)
+                for k, v in asdict(self.config).items()
+            }
+
             forensic_payload = {
+                "schema_version": "2.1",
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "dub_sync_version": "v2.0.0",
                 "execution_time_sec": round(total_elapsed, 2),
                 "output_filename": os.path.basename(output_path),
-                "pipeline_configuration": {
-                    "strategy": self.config.sync_strategy,
-                    "matcher_mode": self.config.matcher_mode,
-                    "scene_threshold": self.config.scene_threshold,
-                    "max_hash_dist": self.config.max_hash_dist,
-                    "center_crop_ratio": self.config.center_crop_ratio,
-                    "discontinuity_threshold_sec": self.config.discontinuity_threshold_sec,
-                    "fallback_mode": self.config.fallback_mode.value,
-                    "audio_sample_rate": self.config.audio_sample_rate,
-                    "crossfade_duration_ms": self.config.crossfade_duration_ms
-                },
+                "pipeline_configuration": config_data,
                 "media_specs": {
                     "ref_filename": ref_info.filename,
                     "tar_filename": tar_info.filename,
@@ -300,12 +423,14 @@ class DubSyncPipeline:
                     "ref_anchors_extracted": len(ref_anchors),
                     "tar_anchors_extracted": len(tar_anchors),
                     "matched_anchors_count": len(visual_matches),
+                    "source_breakdown": source_breakdown,
                     "anchors": anchors_data
                 },
                 "continuous_blocks": blocks_data,
                 "timeline_edl": edl_data,
                 "omitted_censored_gaps": omitted_gaps,
-                "verifier_audit": asdict(audit) if 'audit' in locals() and hasattr(audit, '__dataclass_fields__') else (audit if 'audit' in locals() and isinstance(audit, dict) else {}),
+                "verifier_audit": asdict(audit_obj) if audit_obj is not None and hasattr(audit_obj, '__dataclass_fields__') else (audit_obj if isinstance(audit_obj, dict) else {}),
+                "diagnostics": diagnostics,
                 "quality_summary": {
                     "dub_segments_count": sum(1 for s in edl if s.segment_type == "dub"),
                     "fallback_segments_count": len(omitted_gaps),

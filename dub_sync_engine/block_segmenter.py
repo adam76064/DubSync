@@ -25,6 +25,12 @@ class ContinuousBlock:
     offset: float
     anchor_count: int
     confidence: float
+    # RANSAC fit diagnostics (measured quality, not a fuzzy number).
+    r_squared: float = 0.0       # Pearson r^2 of the block's line fit
+    inlier_ratio: float = 0.0    # n_inliers / n_total for this block
+    coverage_ratio: float = 1.0  # diversity (distinct ref-time buckets / min)
+    n_buckets: int = 0           # distinct ref-time buckets spanned by inliers
+    raw_slope: float = 0.0       # pre-snap fit slope (before broadcast snapping)
 
     @property
     def ref_duration(self) -> float:
@@ -154,7 +160,12 @@ class BlockSegmenterEngine:
                 speed_factor=round(block_slope, 6),
                 offset=round(fit.intercept, 4),
                 anchor_count=int(seg.indices.size),
-                confidence=round(fit.confidence, 3)
+                confidence=round(fit.confidence, 3),
+                r_squared=round(fit.r_squared, 4),
+                inlier_ratio=round(fit.inlier_ratio, 4),
+                coverage_ratio=round(fit.coverage_ratio, 4),
+                n_buckets=int(fit.n_buckets),
+                raw_slope=round(fit.slope, 6),
             ))
 
         return blocks
