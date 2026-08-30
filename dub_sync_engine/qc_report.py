@@ -255,6 +255,18 @@ class ForensicReportGenerator:
         md.append(f"* **Total Keyframes Extracted:** Reference: {matching.get('ref_anchors_extracted', 0)} | Foreign Target: {matching.get('tar_anchors_extracted', 0)}")
         md.append(f"* **Total Matched Keypoints:** **{matching.get('matched_anchors_count', 0)} keypoints**\n")
 
+        consensus_diag = matching.get("consensus_diagnostics") or diag.get("consensus_diagnostics") or {}
+        if consensus_diag:
+            md.append("### Consensus Matcher Diagnostics\n")
+            md.append("| Signal | Value |")
+            md.append("| :--- | :--- |")
+            md.append(f"| Raw visual matches found | {consensus_diag.get('raw_visual_matches_found', 0)} |")
+            md.append(f"| Visual matches gated IN | {consensus_diag.get('visual_matches_gated_in', 0)} |")
+            md.append(f"| Visual matches gated OUT | {consensus_diag.get('visual_matches_gated_out', 0)} |")
+            md.append(f"| Acoustic (music) candidates | {consensus_diag.get('acoustic_candidates', 0)} |")
+            md.append(f"| VAD (speech) candidates | {consensus_diag.get('vad_candidates', 0)} |")
+            md.append("")
+
         raw_anchors = matching.get("anchors", [])
         if raw_anchors:
             r_fps = ref_v.get('fps', 24.0)
@@ -332,6 +344,14 @@ class ForensicReportGenerator:
         md.append("## 7. Closed-Loop Auto-Verification Audit Scorecard\n")
         if audit:
             md.append(f"* **Probed Audit Windows:** {audit.get('total_probed_windows', 0)}")
+            dub_verified = audit.get("dub_windows_verified", 0)
+            dub_skipped = audit.get("dub_windows_skipped", 0)
+            if dub_verified == 0:
+                md.append(f"* **Dub Alignment Windows Verified:** **{dub_verified}** ⚠️ — alignment UNVERIFIED")
+                if dub_skipped:
+                    md.append(f"* **Windows Skipped (no M&E correlation):** {dub_skipped} — the dub & master audio do not correlate in the aligned regions")
+            else:
+                md.append(f"* **Dub Alignment Windows Verified:** {dub_verified} ({dub_skipped} skipped as uninformative)")
             md.append(f"* **Timeline Verification Coverage:** {audit.get('passed_windows_pct', 100.0):.1f}%")
             md.append(f"* **Mean Alignment Error:** `{audit.get('mean_alignment_error_ms', 0):.1f} ms`")
             md.append(f"* **Max Peak Error:** `{audit.get('max_alignment_error_ms', 0):.1f} ms`")
@@ -348,6 +368,8 @@ class ForensicReportGenerator:
                         detail = f"healed {rec.get('healed_duration', 0):.1f}s, lag={rec.get('lag_samples', 0)}"
                     elif rec.get("action") == "CONFIRMED_GENUINE_CUT":
                         detail = f"duration={rec.get('duration', 0):.1f}s"
+                    elif rec.get("detail"):
+                        detail = rec.get("detail")
                     err = rec.get("error_ms")
                     err_s = f"{err:.1f}" if err is not None else "-"
                     corr = rec.get("correlation")

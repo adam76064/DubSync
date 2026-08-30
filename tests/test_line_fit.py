@@ -167,3 +167,16 @@ def test_degenerate_zero_x_variance():
     pts = np.c_[np.full(5, 10.0), np.array([1.0, 2.0, 3.0, 4.0, 5.0])]
     fit = fit_ransac_line(pts)
     assert fit.confidence == 0.0
+
+
+def test_piecewise_forwards_coverage_params():
+    """fit_piecewise_lines must forward coverage params to the RANSAC fit, so a
+    well-spread alignment reports n_buckets>0 instead of the (buggy) n_buckets=0."""
+    rng = np.random.default_rng(13)
+    ref = np.sort(rng.uniform(0, 600, 80))
+    tar = ref + rng.normal(0, 0.1, 80)
+    segs = fit_piecewise_lines(np.c_[ref, tar], min_inlier_ratio=0.8,
+                               coverage_bucket_sec=60.0, min_coverage_buckets=3)
+    assert len(segs) == 1
+    assert segs[0].fit.n_buckets >= 3, f"n_buckets={segs[0].fit.n_buckets}"
+    assert segs[0].fit.coverage_ratio == 1.0

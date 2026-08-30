@@ -137,6 +137,8 @@ class BlockSegmenterEngine:
             slope_lo=self.config.ransac_slope_lo,
             slope_hi=self.config.ransac_slope_hi,
             min_inlier_ratio=self.config.ransac_min_inlier_ratio,
+            coverage_bucket_sec=self.config.ransac_coverage_bucket_sec,
+            min_coverage_buckets=self.config.ransac_min_coverage_buckets,
         )
 
         blocks: List[ContinuousBlock] = []

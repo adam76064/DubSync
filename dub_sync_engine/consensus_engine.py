@@ -24,6 +24,10 @@ class MultiModalConsensusEngine:
         self.visual_engine = VisualAnchorEngine(self.config)
         self.spectral_engine = SpectralFingerprintEngine(self.config)
         self.vad_engine = SileroVADEngine(self.config)
+        # Populated during discover_consensus_anchors() so the pipeline/report can
+        # see *why* the anchor count is what it is (e.g. visual matches found but
+        # gated out vs. never found).
+        self.last_diagnostics: Dict[str, Any] = {}
 
     def discover_consensus_anchors(
         self,
@@ -41,6 +45,13 @@ class MultiModalConsensusEngine:
         3. Enforces multi-frame sequence consistency to eliminate false cartoon matches.
         """
         candidates: List[Dict[str, Any]] = []
+        self.last_diagnostics = {
+            "raw_visual_matches_found": 0,
+            "visual_matches_gated_in": 0,
+            "visual_matches_gated_out": 0,
+            "acoustic_candidates": 0,
+            "vad_candidates": 0,
+        }
 
         # --- STEP 1: Acoustic Background Music & Speech Envelopes (Primary Master Spine) ---
         try:
@@ -159,6 +170,7 @@ class MultiModalConsensusEngine:
         # --- STEP 3: Audio-Gated Multi-Frame Visual Verification ---
         if ref_anchors and tar_anchors:
             raw_visual_matches = self.visual_engine.match_anchors(ref_anchors, tar_anchors)
+            self.last_diagnostics["raw_visual_matches_found"] = len(raw_visual_matches)
 
             # Compute acoustic median offset baseline
             acoustic_offsets = [c["offset"] for c in candidates if c["source"] in ["acoustic_music", "vad_speech"]]
@@ -181,6 +193,7 @@ class MultiModalConsensusEngine:
 
                 if confirming:
                     strength = max(float(c["confidence"]) for c in confirming)
+                    self.last_diagnostics["visual_matches_gated_in"] += 1
                     candidates.append({
                         "ref_time": m.ref_time,
                         "tar_time": m.tar_time,
@@ -190,6 +203,13 @@ class MultiModalConsensusEngine:
                         "source": "visual_gated",
                         "score": m.confidence * 14.0
                     })
+                else:
+                    self.last_diagnostics["visual_matches_gated_out"] += 1
+
+        self.last_diagnostics["acoustic_candidates"] = sum(
+            1 for c in candidates if c["source"] == "acoustic_music")
+        self.last_diagnostics["vad_candidates"] = sum(
+            1 for c in candidates if c["source"] == "vad_speech")
 
         if not candidates:
             return []

@@ -75,6 +75,35 @@ def test_real_cut_not_healed(tmp_path):
     assert any(s.segment_type == "fallback" for s in healed)
 
 
+def test_zero_verified_windows_reports_zero_percent_not_fake_100(tmp_path):
+    """A total alignment failure must surface as 0% verified + UNVERIFIED records,
+    NOT a fake 100% pass with zero measured windows (the Hero-episode bug)."""
+    sr = 16000
+    # Reference is the tonal "cartoon" music bed; target is unrelated broadband
+    # noise. Their M&E envelopes must never correlate above MIN_CORRELATION.
+    ref = gen.make_cartoon_audio(20.0, sr, seed=11)
+    rng = np.random.default_rng(99)
+    tar = rng.standard_normal(int(20.0 * sr)).astype(np.float32)
+    ref_wav = str(tmp_path / "ref.wav")
+    tar_wav = str(tmp_path / "tar.wav")
+    gen.write_wav(ref_wav, ref, sr)
+    gen.write_wav(tar_wav, tar, sr)
+
+    cfg = DubSyncConfig()
+    ver = ClosedLoopVerifierEngine(cfg)
+    edl = [SegmentEDL(0, "dub", 0.0, 20.0, 0.0, 20.0, 1.0, 0.9)]
+    _, audit = ver.audit_and_heal_edl(edl, ref_wav, tar_wav, 20.0, 20.0)
+
+    # No dub window verified -> alignment is UNVERIFIED, reported honestly.
+    assert audit.dub_windows_verified == 0
+    assert audit.passed_windows_pct == 0.0, f"fake 100% pass: {audit.passed_windows_pct}"
+    assert audit.dub_windows_skipped > 0
+    actions = {r.get("action") for r in audit.audit_log}
+    assert "UNVERIFIED_LOW_CORRELATION" in actions or "UNVERIFIED_SILENT" in actions
+    # No window may be marked VERIFIED_ALIGNMENT.
+    assert "VERIFIED_ALIGNMENT" not in actions
+
+
 def test_drift_profile_detects_speed_mismatch(tmp_path):
     """--qc drift profiling: flat offsets at 1.0x, PAL (1/0.96) stretch detected."""
     from scipy.signal import resample

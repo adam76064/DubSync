@@ -275,6 +275,8 @@ def fit_piecewise_lines(
     min_inlier_ratio: float = 0.8,
     min_points: int = 6,
     max_depth: int = 6,
+    coverage_bucket_sec: Optional[float] = None,
+    min_coverage_buckets: Optional[int] = None,
 ) -> List[PiecewiseSegment]:
     """
     Recursively fit piecewise-linear segments through a (ref_time, tar_time)
@@ -311,6 +313,8 @@ def fit_piecewise_lines(
             pts[idx], w[idx],
             inlier_tol=inlier_tol, slope_lo=slope_lo, slope_hi=slope_hi,
             y_bounds=y_bounds,
+            coverage_bucket_sec=coverage_bucket_sec,
+            min_coverage_buckets=min_coverage_buckets,
         )
         # Leaf conditions: clean enough, too deep, too few points to split.
         if (

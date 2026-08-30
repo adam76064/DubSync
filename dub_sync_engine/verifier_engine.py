@@ -29,6 +29,11 @@ class VerificationAudit:
     false_fallbacks_healed_count: int
     healed_duration_sec: float
     audit_log: List[Dict[str, Any]]
+    # Coverage of *real* dub-alignment verification (Pass 2). When zero dub
+    # windows were verified, the alignment is UNVERIFIED — the summary must not
+    # report a passing score.
+    dub_windows_verified: int = 0
+    dub_windows_skipped: int = 0  # probed but correlation below MIN_CORRELATION (uninformative)
 
 
 class ClosedLoopVerifierEngine:
@@ -232,6 +237,8 @@ class ClosedLoopVerifierEngine:
 
         # --- Pass 2: measure real residual alignment error on dub segments ---
         errors_ms: List[float] = []
+        dub_windows_verified = 0
+        dub_windows_skipped = 0
         for seg in healed_edl:
             if seg.segment_type != "dub":
                 continue
@@ -254,13 +261,32 @@ class ClosedLoopVerifierEngine:
                     ref_env, tar_env, sr2, wr0, wr1, wt0, wt1
                 )
                 if result is None:
+                    dub_windows_skipped += 1
+                    audit_records.append({
+                        "ref_start": round(wr0, 3),
+                        "ref_end": round(wr1, 3),
+                        "action": "UNVERIFIED_SILENT",
+                        "detail": "silent / zero-energy window — no alignment signal",
+                    })
                     continue
                 lag, peak = result
                 if peak < self.MIN_CORRELATION:
-                    continue  # silent / uninformative window — don't count it
+                    # Uninformative window: dub & master M&E do NOT correlate here.
+                    # Record it loudly — this is how a totally failed alignment
+                    # surfaces (instead of being silently dropped).
+                    dub_windows_skipped += 1
+                    audit_records.append({
+                        "ref_start": round(wr0, 3),
+                        "ref_end": round(wr1, 3),
+                        "action": "UNVERIFIED_LOW_CORRELATION",
+                        "correlation": round(peak, 4),
+                        "detail": "M&E envelopes do not correlate (below MIN_CORRELATION) — alignment unverifiable",
+                    })
+                    continue
 
                 err_ms = (lag / sr2) * 1000.0
                 errors_ms.append(err_ms)
+                dub_windows_verified += 1
                 audit_records.append({
                     "ref_start": round(wr0, 3),
                     "ref_end": round(wr1, 3),
@@ -278,7 +304,10 @@ class ClosedLoopVerifierEngine:
             max_err = float(np.max(abs_errors))
             passed_pct = float(np.mean(abs_errors <= self.PASS_THRESHOLD_MS) * 100.0)
         else:
-            mean_err, max_err, passed_pct = 0.0, 0.0, 100.0
+            # No dub window was successfully verified. This is a FAILURE of
+            # verification (the dub could not be shown to align), NOT a 100%
+            # pass — report it honestly.
+            mean_err, max_err, passed_pct = 0.0, 0.0, 0.0
 
         audit = VerificationAudit(
             total_probed_windows=len(audit_records),
@@ -287,7 +316,9 @@ class ClosedLoopVerifierEngine:
             passed_windows_pct=round(passed_pct, 1),
             false_fallbacks_healed_count=false_fallbacks_healed,
             healed_duration_sec=round(healed_duration, 2),
-            audit_log=audit_records
+            audit_log=audit_records,
+            dub_windows_verified=dub_windows_verified,
+            dub_windows_skipped=dub_windows_skipped,
         )
 
         return compact_edl, audit

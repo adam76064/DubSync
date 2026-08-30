@@ -305,7 +305,53 @@ class DubSyncPipeline:
 
             audit_obj = locals().get("audit")
             anomalies: List[dict] = []
-            # 1. Anchor offset jumps -> candidate cuts / false-anchor teleports.
+            consensus_diag = getattr(self.consensus_engine, "last_diagnostics", {})
+
+            # 0. Insufficient anchors: too few matched anchors to build a reliable EDL.
+            if len(anchors_data) < 10:
+                anomalies.append({
+                    "type": "insufficient_anchors",
+                    "severity": "critical",
+                    "detail": (f"Only {len(anchors_data)} matched anchors "
+                               f"({len(ref_anchors)} ref / {len(tar_anchors)} tar keyframes extracted). "
+                               "The EDL is built on too sparse a skeleton — likely a matcher failure."),
+                })
+
+            # 1. Visual matcher produced nothing despite substantial keyframes.
+            if (len(ref_anchors) >= 50
+                    and len(tar_anchors) >= 20
+                    and not any(src in ("visual", "visual_gated", "orb") for src in source_breakdown)):
+                found = consensus_diag.get("raw_visual_matches_found", 0)
+                anomalies.append({
+                    "type": "no_visual_matches",
+                    "severity": "critical",
+                    "detail": (f"Visual matcher found {found} raw match(es) but none survived. "
+                               "Possible resolution/framerate mismatch (1080p vs 480p, VFR) breaking hashing, "
+                               "or the dub/master have structurally different scene cuts."),
+                })
+
+            # 2. Visual matches found but all gated out by the acoustic gate.
+            if consensus_diag.get("raw_visual_matches_found", 0) > 0 and consensus_diag.get("visual_matches_gated_in", 0) == 0:
+                anomalies.append({
+                    "type": "visual_matches_all_gated_out",
+                    "severity": "high",
+                    "detail": (f"{consensus_diag.get('raw_visual_matches_found')} visual matches were found "
+                               f"but ALL were rejected by the acoustic gate. The acoustic spine is too weak "
+                               f"({consensus_diag.get('acoustic_candidates', 0)} acoustic anchors) to confirm visuals."),
+                })
+
+            # 3. Verifier verified zero dub windows -> alignment unverified.
+            if audit_obj is not None and getattr(audit_obj, "dub_windows_verified", 0) == 0 and any(s["type"] == "dub" for s in edl_data):
+                anomalies.append({
+                    "type": "no_dub_verification",
+                    "severity": "critical",
+                    "detail": (f"Closed-loop verification could not verify ANY dub alignment "
+                               f"({getattr(audit_obj, 'dub_windows_skipped', 0)} windows skipped: "
+                               "M&E envelopes do not correlate). The dub audio does not match the reference "
+                               "in the 'aligned' regions — the alignment is almost certainly wrong."),
+                })
+
+            # 4. Anchor offset jumps -> candidate cuts / false-anchor teleports.
             for a in anchors_data:
                 if a["offset_jump_to_next"] is not None and abs(a["offset_jump_to_next"]) > 2.0:
                     anomalies.append({
@@ -315,7 +361,7 @@ class DubSyncPipeline:
                         "offset_jump_sec": a["offset_jump_to_next"],
                         "detail": "Large |tar-ref| offset change between consecutive anchors: candidate editorial cut or a false/teleported anchor.",
                     })
-            # 2. Local speeds off the broadcast band -> cut or drift.
+            # 5. Local speeds off the broadcast band -> cut or drift.
             for a in anchors_data:
                 if a["local_speed_to_next"] is not None and not (0.90 <= a["local_speed_to_next"] <= 1.10):
                     anomalies.append({
@@ -325,7 +371,7 @@ class DubSyncPipeline:
                         "local_speed": a["local_speed_to_next"],
                         "detail": "Per-interval speed outside the broadcast band [0.90, 1.10]: likely a real cut or a misplaced anchor.",
                     })
-            # 3. Weak acoustic support on visual anchors.
+            # 6. Weak acoustic support on visual anchors.
             for a in anchors_data:
                 if a["source"] in ("visual", "visual_gated") and a["acoustic_confidence"] < 0.5:
                     anomalies.append({
@@ -335,7 +381,7 @@ class DubSyncPipeline:
                         "acoustic_confidence": a["acoustic_confidence"],
                         "detail": "Visual anchor with poor acoustic confirmation at refinement: could be a soft-cut or a false visual match.",
                     })
-            # 4. Low-confidence / weak-fit blocks.
+            # 7. Low-confidence / weak-fit blocks.
             for b in blocks_data:
                 if b["confidence"] < 0.5:
                     anomalies.append({
@@ -353,7 +399,27 @@ class DubSyncPipeline:
                         "r_squared": b["r_squared"],
                         "detail": "Block line fit has low Pearson r^2: anchors deviate from a single speed line (drift or mixed speeds).",
                     })
-            # 5. Misaligned verifier windows.
+            # 8. Non-standard target framerate (likely VFR) — breaks keyframe timing.
+            _STANDARD_FPS = (23.976, 24.0, 25.0, 29.97, 30.0, 48.0, 50.0, 59.94, 60.0)
+            tar_fps = (tar_info.primary_video.fps if tar_info.primary_video else None)
+            if tar_fps is not None and all(abs(tar_fps - s) > 0.05 for s in _STANDARD_FPS):
+                anomalies.append({
+                    "type": "nonstandard_framerate",
+                    "severity": "high",
+                    "fps": round(tar_fps, 3),
+                    "detail": (f"Target framerate {tar_fps:.3f} is not a broadcast standard — "
+                               "likely a variable-frame-rate file. This breaks keyframe/scene-cut alignment."),
+                })
+            # 9. Undetermined target audio language -> wrong stream may have been selected.
+            tar_lang = tar_info.primary_audio.language if tar_info.primary_audio else None
+            if tar_lang in (None, "und", "unknown", ""):
+                anomalies.append({
+                    "type": "undetermined_audio_language",
+                    "severity": "high",
+                    "lang": tar_lang,
+                    "detail": "Target audio stream language is undetermined ('und') — the wrong audio stream may have been selected for syncing.",
+                })
+            # 10. Misaligned verifier windows.
             if audit_obj is not None and hasattr(audit_obj, "audit_log"):
                 for rec in audit_obj.audit_log:
                     if rec.get("action") == "VERIFIED_ALIGNMENT" and abs(rec.get("error_ms", 0)) > 40.0:
@@ -369,6 +435,7 @@ class DubSyncPipeline:
             diagnostics = {
                 "global_fit": global_fit_summary,
                 "source_breakdown": source_breakdown,
+                "consensus_diagnostics": consensus_diag,
                 "anchor_count": len(anchors_data),
                 "block_count": len(blocks_data),
                 "anomaly_count": len(anomalies),
@@ -424,6 +491,7 @@ class DubSyncPipeline:
                     "tar_anchors_extracted": len(tar_anchors),
                     "matched_anchors_count": len(visual_matches),
                     "source_breakdown": source_breakdown,
+                    "consensus_diagnostics": consensus_diag,
                     "anchors": anchors_data
                 },
                 "continuous_blocks": blocks_data,
