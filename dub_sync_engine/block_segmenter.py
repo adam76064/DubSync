@@ -67,6 +67,8 @@ class BlockSegmenterEngine:
             inlier_tol=self.config.ransac_inlier_tolerance_sec,
             slope_lo=self.config.ransac_slope_lo,
             slope_hi=self.config.ransac_slope_hi,
+            coverage_bucket_sec=self.config.ransac_coverage_bucket_sec,
+            min_coverage_buckets=self.config.ransac_min_coverage_buckets,
         )
 
     def calibrate_global_slope(self, matches: List[AnchorMatch]) -> float:

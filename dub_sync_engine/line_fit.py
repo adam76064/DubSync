@@ -32,7 +32,9 @@ class LineFit:
     n_inliers: int
     n_total: int
     inlier_mask: np.ndarray   # boolean mask over the input points
-    confidence: float         # r_squared * inlier_ratio (composite 0..1 metric)
+    confidence: float         # r^2 * inlier_ratio * coverage_ratio (composite 0..1)
+    coverage_ratio: float = 1.0   # min(1, distinct_ref_buckets / min_buckets)
+    n_buckets: int = 0            # distinct ref-time buckets spanned by inliers
 
     def predict(self, x: float) -> float:
         return self.slope * x + self.intercept
@@ -87,6 +89,8 @@ def fit_ransac_line(
     slope_lo: float = 0.85,
     slope_hi: float = 1.15,
     y_bounds: Optional[Tuple[float, float]] = None,
+    coverage_bucket_sec: Optional[float] = None,
+    min_coverage_buckets: Optional[int] = None,
 ) -> LineFit:
     """
     Fit the dominant line `y = a*x + b` through a (ref_time, tar_time) point
@@ -103,6 +107,12 @@ def fit_ransac_line(
     y_bounds : optional (y_lo, y_hi). Candidate lines must map the observed
         x-range into this target-time range (global-consistency check, adapted
         from subsync's endpoint constraint to tolerate real offsets).
+    coverage_bucket_sec / min_coverage_buckets : optional diversity constraint.
+        When both are set, inliers must span at least `min_coverage_buckets`
+        distinct `floor(ref_time / coverage_bucket_sec)` buckets; otherwise the
+        fit's confidence is scaled down by `coverage_ratio`. Prevents a single
+        dense region (e.g. a false black-frame cluster) from over-determining
+        the line.
 
     Returns a LineFit. If no valid line is found (e.g. < 2 points), returns a
     degenerate fit (identity slope, 0 inliers, confidence 0.0).
@@ -199,6 +209,17 @@ def fit_ransac_line(
     mask[idx] = True
     n_in = int(mask.sum())
     inlier_ratio = n_in / n
-    confidence = float(r2 * inlier_ratio)
+
+    # Diversity / coverage constraint: inliers must span distinct ref-time
+    # buckets, otherwise one dense region could over-determine the line.
+    coverage_ratio = 1.0
+    n_buckets = 0
+    if coverage_bucket_sec is not None and min_coverage_buckets and min_coverage_buckets > 1:
+        buckets = np.floor(x[idx] / coverage_bucket_sec).astype(int)
+        n_buckets = int(np.unique(buckets).size)
+        coverage_ratio = min(1.0, n_buckets / float(min_coverage_buckets))
+
+    confidence = float(r2 * inlier_ratio * coverage_ratio)
     return LineFit(float(a), float(b), float(r2), float(inlier_ratio),
-                   n_in, n, mask, confidence)
+                   n_in, n, mask, confidence,
+                   coverage_ratio=coverage_ratio, n_buckets=n_buckets)

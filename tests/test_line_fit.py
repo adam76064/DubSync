@@ -90,6 +90,30 @@ def test_y_bounds_constraint():
     assert fit.confidence < 0.9, "out-of-bounds line must be rejected"
 
 
+def test_coverage_constraint_downgrades_dense_cluster():
+    """Inliers confined to one ref-time bucket must not earn full confidence."""
+    rng = np.random.default_rng(7)
+    # 40 points all within a single 60s bucket, on a bogus line (slope 1.05).
+    ref = rng.uniform(0, 59, 40)
+    tar = 1.05 * ref + 0.0 + rng.normal(0, 0.1, 40)
+    fit = fit_ransac_line(np.c_[ref, tar],
+                          coverage_bucket_sec=60.0, min_coverage_buckets=3)
+    assert fit.n_buckets < 3
+    assert fit.coverage_ratio < 1.0
+    assert fit.confidence < fit.r_squared * fit.inlier_ratio
+
+
+def test_coverage_constraint_satisfied_when_spread():
+    """Inliers spanning many buckets keep full confidence."""
+    rng = np.random.default_rng(8)
+    ref = np.sort(rng.uniform(0, 600, 60))
+    tar = ref + rng.normal(0, 0.1, 60)
+    fit = fit_ransac_line(np.c_[ref, tar],
+                          coverage_bucket_sec=60.0, min_coverage_buckets=3)
+    assert fit.n_buckets >= 3
+    assert fit.coverage_ratio == 1.0
+
+
 def test_degenerate_single_point():
     fit = fit_ransac_line([[10.0, 12.0]])
     assert isinstance(fit, LineFit)
