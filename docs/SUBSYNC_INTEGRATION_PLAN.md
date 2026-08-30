@@ -6,38 +6,18 @@
 
 ## To-do list (ordered; each item = dig deep → integrate → test → checkpoint)
 
-1. **RANSAC line fitter** — implement a `LineFinder`-style robust fitter in a new
-   `dub_sync_engine/line_fit.py` (pure numpy): incremental point-cloud line fit with
-   inlier counting, monotonic-slope + global-consistency constraints, and iterative
-   furthest-outlier removal. Returns slope `a`, intercept `b`, r², and inlier set.
-   - Dig deep: exact math, quadrant bucketing, constraints, edge cases.
-   - Integrate: unit-testable standalone module first; then wire into
-     `block_segmenter.calibrate_global_slope()` and `cluster_into_blocks()`.
-
-2. **Pearson r² as real confidence** — replace the fuzzy `mean(anchor.confidence)`
-   with the fit's r² + inlier ratio in `ContinuousBlock.confidence` and the forensic
-   report (`pipeline.py`).
-   - Dig deep: what r² means here, degenerate cases (few points, collinear),
-     calibration to a 0–1 confidence.
-
-3. **Continuous similarity weights** — `consensus_engine.py` currently *binary-gates*
-   visual matches on acoustic support. Emit a continuous `weight` (normalized M&E
-   correlation at the cut × seq_len boost) and feed it into the fitter.
-   - Dig deep: what signal to use, how to normalize, how to avoid dropping real
-     anchors (the historical regression risk).
-
-4. **Coverage / diversity constraint** — require RANSAC inliers to span distinct
-   act/scene windows (min points across min ref-time span), not just a raw count.
-   - Dig deep: how to bucket by ref time, thresholds, interaction with real cuts.
-
-5. **Recursive piecewise refinement** — after the global line, bisect at the largest
-   inlier gap and refit each side (tympanix `sync_all` idea) to recover multi-speed
-   episodes without hand-tuned discontinuity thresholds.
-   - Dig deep: split criterion, margin shrinking, termination, interaction with
-     broadcast-speed snapping.
-
-6. **Full validation** — extend the synthetic fixture matrix with planted-outlier
-   cases; run the whole suite; end-to-end smoke; commit + tag per completed idea.
+1. **RANSAC line fitter** ✅ `checkpoint-subsync-1` — `dub_sync_engine/line_fit.py`.
+2. **Pearson r² as real confidence** ✅ `checkpoint-subsync-2` — `_block_confidence`,
+   `calibrate_global_fit`.
+3. **Continuous similarity weights** ✅ `checkpoint-subsync-3` — `AnchorMatch.weight`,
+   consensus-engine confirmation strength.
+4. **Coverage / diversity constraint** ✅ `checkpoint-subsync-4` — `coverage_ratio`.
+5. **Recursive piecewise refinement** ✅ `checkpoint-subsync-5` (+`-5b` for the
+   `build_macro_edl` per-act-speed wiring) — `fit_piecewise_lines`, residual-minimizing
+   breakpoint split.
+6. **Full validation** ✅ — planted-outlier fixtures, full suite green (55 tests),
+   imports/compile clean. End-to-end smoke is out of scope per the owner's
+   "no_static" constraint.
 
 ## Ground rules
 
@@ -113,11 +93,14 @@ global slope.
 ### Idea 5 — Recursive piecewise refinement
 tympanix `sync_all`: global fit → bisect → refit each half with shrinking margin.
 For DubSync:
-- After the global RANSAC fit, if `inlier_ratio < target` (e.g. 0.8), find the
-  largest gap between consecutive inliers and split the anchor set there.
-- Refit each side independently (each returns its own slope/offset/inliers),
-  recursing until `inlier_ratio ≥ target`, span `< min_span`, or depth limit.
+- After the global RANSAC fit, if `inlier_ratio < target` (e.g. 0.8), split at
+  the breakpoint that **minimizes the combined weighted residual of two
+  independent least-squares fits** (segmented-regression breakpoint estimate).
+  *(Inlier-gap heuristics were tried and rejected: they are not robust for
+  contiguous multi-speed acts and depend on the random anchor realization.)*
+- Refit each side independently, recursing until `inlier_ratio ≥ target`,
+  too few points, or depth limit.
 - Each resulting leaf line becomes one `ContinuousBlock` (slope snapped to a
-  broadcast standard). This replaces the greedy
-  `discontinuity_threshold_sec` clustering with a principled, inlier-driven
-  segmentation.
+  broadcast standard), and `build_macro_edl` applies the per-act block speed
+  via `_speed_at`. This replaces the greedy `discontinuity_threshold_sec`
+  clustering with a principled, inlier-driven segmentation.
