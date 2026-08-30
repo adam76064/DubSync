@@ -350,6 +350,66 @@ class SyncPathEstimator:
                 right.ref_start = round(transition, 3)
                 right.tar_start = round(right.slope * right.ref_start + right.intercept, 3)
 
+    def build_edl(
+        self,
+        segments: List[PathSegment],
+        ref_duration: float,
+        tar_duration: float,
+    ):
+        """
+        Convert measured path segments into an EDL: each segment becomes a dub
+        span, and the reference time *not* covered by a segment (cuts between
+        segments, the intro gap, and the tail trim) becomes a fallback span.
+        Missing content is represented honestly — never force-dubbed.
+        """
+        from .audio_splicer import SegmentEDL, sanitize_edl
+
+        edl = []
+        seg_id = 0
+
+        # Opening gap (intro the dub lacks).
+        if segments and segments[0].ref_start > 0.05:
+            edl.append(SegmentEDL(
+                seg_id, "fallback",
+                0.0, round(segments[0].ref_start, 3),
+                0.0, 0.0, 1.0, 1.0,
+            ))
+            seg_id += 1
+
+        for i, s in enumerate(segments):
+            edl.append(SegmentEDL(
+                seg_id, "dub",
+                s.ref_start, s.ref_end,
+                max(0.0, s.tar_start), s.tar_end,
+                s.slope, s.confidence,
+            ))
+            seg_id += 1
+
+            # Gap to the next segment = a cut (censored/omitted scene).
+            if i + 1 < len(segments):
+                nxt = segments[i + 1]
+                if nxt.ref_start > s.ref_end + 0.05:
+                    edl.append(SegmentEDL(
+                        seg_id, "fallback",
+                        round(s.ref_end, 3), round(nxt.ref_start, 3),
+                        round(s.tar_end, 3), round(nxt.tar_start, 3),
+                        1.0, 1.0,
+                    ))
+                    seg_id += 1
+
+        # Tail trim (the dub ends before the master).
+        if segments and segments[-1].ref_end < ref_duration - 0.05:
+            last = segments[-1]
+            edl.append(SegmentEDL(
+                seg_id, "fallback",
+                round(last.ref_end, 3), round(ref_duration, 3),
+                round(last.tar_end, 3), round(tar_duration, 3),
+                1.0, 1.0,
+            ))
+            seg_id += 1
+
+        return sanitize_edl(edl, self.config)
+
     @staticmethod
     def _complete_seams(segments: List[PathSegment], ref_duration: float, tar_duration: float) -> None:
         """

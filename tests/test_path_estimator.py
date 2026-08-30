@@ -64,6 +64,29 @@ def test_recut_recovers_cut_and_tail(tmp_path):
     assert s2.ref_end <= 62.0
 
 
+def test_build_edl_marks_cut_and_tail_as_fallback(tmp_path):
+    """The measured path must become dub segments for synced regions and
+    fallback segments for the cut (ref 30-32) and the tail trim (ref 60-100)."""
+    rw, tw, ref, tar = _recut_audio(tmp_path)
+    est = SyncPathEstimator(DubSyncConfig())
+    segs = est.extract_path(rw, tw, 100.0, len(tar) / 16000)
+    edl = est.build_edl(segs, 100.0, len(tar) / 16000)
+
+    dubs = [s for s in edl if s.segment_type == "dub"]
+    fallbacks = [s for s in edl if s.segment_type == "fallback"]
+
+    assert len(dubs) == 2, f"expected 2 dub segments, got {len(dubs)}"
+    assert len(fallbacks) >= 1, f"expected fallback for the cut + tail"
+
+    # The tail trim (ref > 60) must be represented as a fallback, not force-dubbed.
+    tail = [f for f in fallbacks if f.ref_start >= 55.0]
+    assert tail, "tail trim not marked as fallback"
+
+    # The total reference timeline must be fully covered by dub + fallback.
+    assert edl[0].ref_start == 0.0
+    assert abs(edl[-1].ref_end - 100.0) < 0.1
+
+
 def test_clean_episode_is_one_segment(tmp_path):
     """No cuts, no trim -> a single segment covering the whole episode."""
     sr = 16000

@@ -22,6 +22,7 @@ from .vad_engine import SileroVADEngine
 from .acoustic_refine import AcousticRefineEngine
 from .audio_splicer import AudioSplicerEngine
 from .consensus_engine import MultiModalConsensusEngine
+from .path_estimator import SyncPathEstimator
 from .verifier_engine import ClosedLoopVerifierEngine
 from .mkv_muxer import MKVMuxer
 from .qc_report import QCReportGenerator, QCReport
@@ -43,6 +44,7 @@ class DubSyncPipeline:
         self.spectral_engine = SpectralFingerprintEngine(self.config)
         self.vad_engine = SileroVADEngine(self.config)
         self.consensus_engine = MultiModalConsensusEngine(self.config)
+        self.path_estimator = SyncPathEstimator(self.config)
         self.verifier_engine = ClosedLoopVerifierEngine(self.config)
         self.acoustic_engine = AcousticRefineEngine(self.config)
         self.splicer = AudioSplicerEngine(self.config)
@@ -157,11 +159,18 @@ class DubSyncPipeline:
                 avg_shift_ms = sum(r.acoustic_offset_ms for r in refined) / max(1, len(refined))
                 console.print(f"  [bold green][OK][/bold green] [bold cyan]Acoustic Refine[/bold cyan] snapped {len(visual_matches)} anchors (mean acoustic shift: [bold yellow]{avg_shift_ms:+.2f}ms[/bold yellow]).")
 
-            # --- STAGE 5: Adaptive Block Clustering or Neural DTW Warping ---
+            # --- STAGE 5: Adaptive Block Clustering, Dense Path, or Neural DTW ---
+            blocks = []
+            path_segments = []
             if strategy == "dtw":
                 with console.status("[bold cyan]Stage 5/7 (Neural DTW): Computing dense speech probability Dynamic Time Warping path...[/bold cyan]", spinner="dots"):
                     edl = self.vad_engine.compute_neural_dtw_edl(ref_wav, tar_wav, ref_info.duration, tar_info.duration)
                 console.print(f"  [bold green][OK][/bold green] [bold cyan]Neural DTW[/bold cyan] constructed [bold green]{len(edl)} continuous dialogue nodes[/bold green].")
+            elif strategy == "path":
+                with console.status("[bold cyan]Stage 5/7 (Dense Sync-Path): Measuring the true ref->tar path from the M&E fingerprint (speed + cuts + tail)...[/bold cyan]", spinner="dots"):
+                    path_segments = self.path_estimator.extract_path(ref_wav, tar_wav, ref_info.duration, tar_info.duration)
+                    edl = self.path_estimator.build_edl(path_segments, ref_info.duration, tar_info.duration)
+                console.print(f"  [bold green][OK][/bold green] [bold cyan]Dense Sync-Path[/bold cyan] measured [bold green]{len(path_segments)} synced region(s)[/bold green] -> {len(edl)} EDL segment(s).")
             else:
                 with console.status("[bold cyan]Stage 5/7: Adaptive Macro-Block Clustering & Independent Speed Calibration...[/bold cyan]", spinner="dots"):
                     blocks = self.block_segmenter.cluster_into_blocks(
@@ -175,6 +184,18 @@ class DubSyncPipeline:
                         console.print("  [bold yellow][!][/bold yellow] Zero macro anchors found. Activating [bold cyan]Neural DTW Speech Warping[/bold cyan]...")
                         edl = self.vad_engine.compute_neural_dtw_edl(ref_wav, tar_wav, ref_info.duration, tar_info.duration)
                         console.print(f"  [bold green][OK][/bold green] [bold cyan]Neural DTW[/bold cyan] constructed [bold green]{len(edl)} continuous dialogue nodes[/bold green].")
+                    elif len(visual_matches) < 10 and strategy != "blocks":
+                        # Sparse anchors: block segmentation collapses to one
+                        # continuous block and cannot see a mid-episode cut or a
+                        # tail trim. Measure the true path directly instead.
+                        console.print(f"  [bold yellow][!][/bold yellow] Only {len(visual_matches)} anchors survived — too sparse for block segmentation. Measuring the dense sync path...")
+                        path_segments = self.path_estimator.extract_path(ref_wav, tar_wav, ref_info.duration, tar_info.duration)
+                        if path_segments:
+                            edl = self.path_estimator.build_edl(path_segments, ref_info.duration, tar_info.duration)
+                            console.print(f"  [bold green][OK][/bold green] [bold cyan]Dense Sync-Path[/bold cyan] measured [bold green]{len(path_segments)} synced region(s)[/bold green] -> {len(edl)} EDL segment(s).")
+                        else:
+                            console.print("  [bold yellow][!][/bold yellow] Dense path estimation also failed; falling back to block segmentation.")
+                            edl = self.block_segmenter.build_macro_edl(ref_info.duration, tar_info.duration, blocks, matches=visual_matches)
                     else:
                         console.print(f"  [bold green][OK][/bold green] Clustered into [bold cyan]{len(blocks)} continuous macro-blocks[/bold cyan] with independent speed calibration.")
                         for b in blocks:
@@ -226,6 +247,20 @@ class DubSyncPipeline:
                     "n_buckets": b.n_buckets,
                 }
                 for b in (blocks if 'blocks' in locals() else [])
+            ]
+
+            path_segments_data = [
+                {
+                    "ref_start": s.ref_start,
+                    "ref_end": s.ref_end,
+                    "tar_start": s.tar_start,
+                    "tar_end": s.tar_end,
+                    "slope": s.slope,
+                    "intercept": s.intercept,
+                    "n_points": s.n_points,
+                    "confidence": s.confidence,
+                }
+                for s in path_segments
             ]
 
             anchors_data = []
@@ -495,6 +530,8 @@ class DubSyncPipeline:
                     "anchors": anchors_data
                 },
                 "continuous_blocks": blocks_data,
+                "sync_path_segments": path_segments_data,
+                "path_diagnostics": getattr(self.path_estimator, "last_diagnostics", {}),
                 "timeline_edl": edl_data,
                 "omitted_censored_gaps": omitted_gaps,
                 "verifier_audit": asdict(audit_obj) if audit_obj is not None and hasattr(audit_obj, '__dataclass_fields__') else (audit_obj if isinstance(audit_obj, dict) else {}),
