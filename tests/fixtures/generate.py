@@ -277,6 +277,34 @@ def make_cartoon_audio(duration: float, sr: int = 16000, seed: int = 0) -> np.nd
     return (signal / peak).astype(np.float32)
 
 
+def make_distinctive_audio(duration: float, sr: int = 16000, seed: int = 0) -> np.ndarray:
+    """
+    A NON-REPETITIVE, temporally distinctive signal for testing dense
+    cross-correlation / path estimation. Each 0.5s cell is a unique random
+    chord (2-4 random frequencies in the M&E band with a plucky decay), so a
+    window correlates sharply ONLY at its true position — unlike `make_cartoon_audio`,
+    whose small pentatonic scale + periodic percussive hits false-match
+    everywhere under full-file correlation.
+    """
+    rng = np.random.default_rng(seed)
+    n = int(duration * sr)
+    sig = np.zeros(n, dtype=np.float64)
+    pos = 0.0
+    cell = 0.5
+    while pos < duration:
+        n_freqs = int(rng.integers(2, 5))
+        freqs = rng.uniform(300, 3900, n_freqs)
+        amps = rng.uniform(0.2, 1.0, n_freqs)
+        s0 = int(pos * sr)
+        s1 = min(n, int((pos + cell) * sr))
+        local = np.arange(s1 - s0) / sr
+        env = np.exp(-local * 8.0)
+        for f, a in zip(freqs, amps):
+            sig[s0:s1] += a * np.sin(2 * np.pi * f * local + rng.uniform(0, 6.28)) * env
+        pos += cell
+    return (sig / (np.max(np.abs(sig)) + 1e-9)).astype(np.float32)
+
+
 def write_wav(path: str, data: np.ndarray, sr: int = 16000) -> str:
     import scipy.io.wavfile as wavfile
     os.makedirs(os.path.dirname(path), exist_ok=True)

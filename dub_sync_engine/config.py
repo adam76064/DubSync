@@ -111,6 +111,17 @@ class DubSyncConfig:
     ransac_min_inlier_ratio: float = 0.80  # Coverage target for a single global line (below -> recursive split)
     ransac_coverage_bucket_sec: float = 60.0  # Ref-time bucket size for the coverage constraint
     ransac_min_coverage_buckets: int = 3     # Min distinct ref-time buckets the inliers must span
+
+    # --- Dense Sync-Path Estimator (similarity matrix + ridge extraction) ---
+    # Measures the true (ref_time -> tar_time) path directly from the M&E
+    # envelope instead of assuming a single continuous speed. Reveals cuts, tail
+    # trims, and the real speed ratio — the "ground truth" for re-cut dubs.
+    path_window_sec: float = 15.0        # Ref window length for each dense probe
+    path_hop_sec: float = 2.0            # Hop between adjacent dense probes
+    path_min_correlation: float = 0.4    # Drop dense points below this peak (silence/garbage)
+    path_jump_threshold_sec: float = 0.8 # Offset jump that marks a cut boundary (offset step detection)
+    path_min_segment_sec: float = 4.0    # Drop recovered segments shorter than this
+    path_step_window_points: int = 2     # Before/after median window (points) for step detection
     
     # --- Output Codec & Container ---
     audio_codec: str = "aac"
