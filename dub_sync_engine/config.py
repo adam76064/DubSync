@@ -45,8 +45,9 @@ class DubSyncConfig:
     dtw_band_sec: float = 35.0         # Sakoe-Chiba constraint band for DTW
     dtw_node_interval_sec: float = 20.0# Interval between DTW retiming nodes
     
-    # --- Acoustic Sub-Millisecond Refinement ---
+    # --- Acoustic Sub-Millisecond Refinement & Stem Separation ---
     enable_acoustic_refine: bool = True# Sub-millisecond acoustic cross-correlation on 48kHz audio
+    enable_stem_separation: bool = True# Safe streaming 2-stem Dialogue vs M&E Separation
     acoustic_window_ms: float = 350.0  # Search window around visual anchor in milliseconds (+/- 350ms)
     audio_sample_rate: int = 48000     # Internal high-fidelity processing sample rate
     speech_band_attenuation: bool = True# Attenuate 300Hz-3.4kHz dialogue to correlate pure M&E
@@ -67,6 +68,7 @@ class DubSyncConfig:
     # --- Debug & Performance ---
     num_threads: int = 0               # 0 = auto-detect all available CPU cores
     verbose: bool = False
+    cleanup_temp: Optional[bool] = None# None = prompt, True = delete, False = preserve
     
     def apply_preset(self, preset: Preset):
         self.preset = preset

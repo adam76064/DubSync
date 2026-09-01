@@ -23,6 +23,7 @@ from .acoustic_refine import AcousticRefineEngine
 from .audio_splicer import AudioSplicerEngine
 from .consensus_engine import MultiModalConsensusEngine
 from .verifier_engine import ClosedLoopVerifierEngine
+from .stem_separator import StemSeparatorEngine
 from .mkv_muxer import MKVMuxer
 from .qc_report import QCReportGenerator, QCReport
 from .tui import DubSyncTUI
@@ -42,6 +43,7 @@ class DubSyncPipeline:
         self.orb_matcher = ORBMatcherEngine(self.config)
         self.spectral_engine = SpectralFingerprintEngine(self.config)
         self.vad_engine = SileroVADEngine(self.config)
+        self.stem_separator = StemSeparatorEngine(self.config)
         self.consensus_engine = MultiModalConsensusEngine(self.config)
         self.verifier_engine = ClosedLoopVerifierEngine(self.config)
         self.acoustic_engine = AcousticRefineEngine(self.config)
@@ -68,7 +70,7 @@ class DubSyncPipeline:
             self.tui.display_media_summary(ref_info, tar_info)
             console.print()
 
-            # --- STAGE 2: Extract PCM WAVs ---
+            # --- STAGE 2: Extract PCM WAVs & Streaming STFT Stem Separation ---
             ref_wav = os.path.join(temp_dir, "ref_pcm.wav")
             tar_wav = os.path.join(temp_dir, "tar_pcm.wav")
 
@@ -76,6 +78,19 @@ class DubSyncPipeline:
                 self.probe.extract_pcm_wav(ref_path, ref_wav, sample_rate=self.config.audio_sample_rate)
                 self.probe.extract_pcm_wav(tar_path, tar_wav, sample_rate=self.config.audio_sample_rate)
                 console.print("  [bold green][OK][/bold green] PCM 48kHz audio extracted successfully.")
+
+            # Safe Streaming STFT 2-Stem Source Separation
+            ref_vocal_wav, ref_me_wav = ref_wav, ref_wav
+            tar_vocal_wav, tar_me_wav = tar_wav, tar_wav
+            if self.config.enable_stem_separation:
+                try:
+                    with console.status("[bold cyan]Stage 2b/7: Safe Streaming STFT Stem Separation (Dialogue vs Pure M&E)...[/bold cyan]", spinner="dots"):
+                        ref_vocal_wav, ref_me_wav = self.stem_separator.separate(ref_wav, temp_dir, "ref")
+                        tar_vocal_wav, tar_me_wav = self.stem_separator.separate(tar_wav, temp_dir, "tar")
+                    console.print("  [bold green][OK][/bold green] [bold cyan]Streaming STFT Separation:[/bold cyan] Isolated Vocals and Pure M&E stems generated.")
+                except Exception:
+                    ref_vocal_wav, ref_me_wav = ref_wav, ref_wav
+                    tar_vocal_wav, tar_me_wav = tar_wav, tar_wav
 
             # --- STAGE 3: Safe-Zone Crop & Keyframe Extraction ---
             frames_dir = os.path.join(temp_dir, "frames")
@@ -96,9 +111,9 @@ class DubSyncPipeline:
             mode = self.config.matcher_mode
 
             if strategy == "hybrid" or mode == "auto":
-                with console.status("[bold cyan]Stage 4/7 (Multi-Modal Consensus): Fusing Visual Keyframes, Background Music Transients & Silero Neural VAD...[/bold cyan]", spinner="dots"):
+                with console.status("[bold cyan]Stage 4/7 (Multi-Modal Consensus): Fusing Visual Keyframes, Pure M&E Transients & Silero Neural VAD...[/bold cyan]", spinner="dots"):
                     visual_matches = self.consensus_engine.discover_consensus_anchors(
-                        ref_anchors, tar_anchors, ref_wav, tar_wav, ref_info.duration, tar_info.duration
+                        ref_anchors, tar_anchors, ref_me_wav, tar_me_wav, ref_info.duration, tar_info.duration
                     )
                 console.print(f"  [bold green][OK][/bold green] [bold cyan]Multi-Modal Consensus Lattice[/bold cyan] constructed [bold green]{len(visual_matches)} strong cross-modal anchors[/bold green].")
 
@@ -318,8 +333,11 @@ class DubSyncPipeline:
             console.print(f"\n[bold yellow][DEBUG ARTIFACTS][/bold yellow] Intermediate WAVs & frames stored at:")
             console.print(f"       -> [cyan]{temp_dir}[/cyan]")
             try:
-                from rich.prompt import Confirm
-                delete_temp = Confirm.ask("Do you want to DELETE this temporary debug folder?", default=False)
+                if self.config.cleanup_temp is not None:
+                    delete_temp = self.config.cleanup_temp
+                else:
+                    from rich.prompt import Confirm
+                    delete_temp = Confirm.ask("Do you want to DELETE this temporary debug folder?", default=False)
                 if delete_temp:
                     shutil.rmtree(temp_dir, ignore_errors=True)
                     console.print("  [dim]Temporary debug folder deleted.[/dim]")

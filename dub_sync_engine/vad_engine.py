@@ -57,9 +57,10 @@ class SileroVADEngine:
             audio_mono = audio_mono / 32768.0
 
         # Resample to 16,000Hz if needed
-        if sr != self.sample_rate:
-            num_target_samples = int(len(audio_mono) * (self.sample_rate / sr))
-            audio_16k = scipy.signal.resample(audio_mono, num_target_samples).astype(np.float32)
+        if sr == 48000 and self.sample_rate == 16000:
+            audio_16k = audio_mono[::3].copy()
+        elif sr != self.sample_rate:
+            audio_16k = scipy.signal.resample_poly(audio_mono, self.sample_rate // 1000, sr // 1000).astype(np.float32)
         else:
             audio_16k = audio_mono
 
