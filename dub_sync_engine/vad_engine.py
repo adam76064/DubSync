@@ -312,3 +312,56 @@ class SileroVADEngine:
             seg_id += 1
 
         return edl
+
+    def compute_speech_density(self, wav_path: str, bin_size_sec: float = 0.10) -> Tuple[np.ndarray, float]:
+        """
+        Discretizes Silero VAD speech probabilities into 10Hz binned dialogue density curve [0.0, 1.0].
+        """
+        probs, dt = self.compute_speech_probabilities(wav_path)
+        ratio = max(1, int(round(bin_size_sec / dt)))
+        num_bins = len(probs) // ratio
+        if num_bins > 0:
+            reshaped = probs[:num_bins * ratio].reshape(num_bins, ratio)
+            density = np.mean(reshaped, axis=1).astype(np.float32)
+        else:
+            density = probs.astype(np.float32)
+        return density, bin_size_sec
+
+    def validate_anchor_speech_consistency(
+        self,
+        ref_time: float,
+        tar_time: float,
+        d_ref: np.ndarray,
+        d_tar: np.ndarray,
+        dt: float = 0.10,
+        window_sec: float = 3.0
+    ) -> Tuple[bool, float]:
+        """
+        Validates whether dialogue activity around ref_time and tar_time is physically consistent.
+        Rejects anchors if one track has intense dialogue while the other is pure music/silence.
+        """
+        w_bins = int(window_sec / dt)
+        half_w = w_bins // 2
+
+        f_ref = int(ref_time / dt)
+        f_tar = int(tar_time / dt)
+
+        r_start = max(0, f_ref - half_w)
+        r_end = min(len(d_ref), f_ref + half_w)
+        t_start = max(0, f_tar - half_w)
+        t_end = min(len(d_tar), f_tar + half_w)
+
+        if (r_end - r_start) < (w_bins // 2) or (t_end - t_start) < (w_bins // 2):
+            return True, 0.5  # Neutral at extreme ends
+
+        mean_r = float(np.mean(d_ref[r_start:r_end]))
+        mean_t = float(np.mean(d_tar[t_start:t_end]))
+
+        # High dialogue contradiction:
+        # One is talking (>0.60 speech) while the other has virtually zero dialogue (<0.15 speech)
+        if (mean_t > 0.60 and mean_r < 0.15) or (mean_r > 0.60 and mean_t < 0.15):
+            return False, 0.0
+
+        # Similarity score between dialogue envelopes
+        sim = 1.0 - abs(mean_r - mean_t)
+        return True, max(0.0, sim)

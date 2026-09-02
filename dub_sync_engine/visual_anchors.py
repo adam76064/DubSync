@@ -176,28 +176,46 @@ class VisualAnchorEngine:
                     confidence = max(0.0, 1.0 - (composite_dist / 12.0)) * (0.5 + 0.5 * max(0.0, color_sim))
                     score = (12.0 - composite_dist) + (color_sim * 4.0)
 
-                    # Step 1b: Multi-Frame Temporal Sequence Verification
-                    # Look ahead 1 to 2 keyframes to verify sequence rhythm
+                    # Step 1b: N-Gram Temporal Shot-Rhythm DNA Verification
+                    # Checks sequences of up to N=4 consecutive cut durations & relative ratios
                     seq_len = 1
-                    for k in range(1, 3):
+                    rhythm_matched = False
+                    for k in range(1, 4):
                         if (r_idx + k) < len(ref_anchors) and (t_idx + k) < len(tar_anchors):
                             rk = ref_anchors[r_idx + k]
                             tk = tar_anchors[t_idx + k]
                             p_k = rk.phash - tk.phash
                             d_k = rk.dhash - tk.dhash
                             c_k = (p_k + d_k) / 2.0
-                            if c_k <= self.config.max_hash_dist + 2:
-                                dr = rk.pts_time - r.pts_time
-                                dt = tk.pts_time - t.pts_time
-                                if dr > 0.1 and dt > 0.1:
-                                    ratio = dt / dr
-                                    if 0.92 <= ratio <= 1.05:
-                                        seq_len += 1
-                                        score += (10.0 - c_k) * 1.5
+                            
+                            dr = rk.pts_time - ref_anchors[r_idx + k - 1].pts_time
+                            dt = tk.pts_time - tar_anchors[t_idx + k - 1].pts_time
 
-                    if seq_len >= 2:
-                        confidence = min(1.0, confidence + 0.20)
-                        score += 15.0 * (seq_len - 1)
+                            if dr > 0.08 and dt > 0.08:
+                                ratio = dt / dr
+                                # Broadcast tempo check (0.91x to 1.06x)
+                                if 0.91 <= ratio <= 1.06:
+                                    if c_k <= self.config.max_hash_dist + 2:
+                                        seq_len += 1
+                                        score += (12.0 - c_k) * 2.0
+                                    elif c_k <= self.config.max_hash_dist + 4 and k >= 2:
+                                        # Rhythm alone is so strong that even with moderate visual distortion, it reinforces
+                                        seq_len += 1
+                                        score += 6.0
+                                        rhythm_matched = True
+
+                    # Significant boost for confirmed N-gram shot rhythms
+                    if seq_len >= 3 or rhythm_matched:
+                        confidence = min(1.0, confidence + 0.35)
+                        score += 35.0 * (seq_len - 1)
+                    elif seq_len == 2:
+                        confidence = min(1.0, confidence + 0.15)
+                        score += 15.0
+                    else:
+                        # Isolated single cut match with no rhythm support: penalize if hash distance is marginal
+                        if composite_dist > 5:
+                            score *= 0.4
+                            confidence *= 0.6
 
                     raw_candidates.append({
                         "r_idx": r_idx,

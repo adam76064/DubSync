@@ -43,6 +43,13 @@ class MultiModalConsensusEngine:
         candidates: List[Dict[str, Any]] = []
 
         # --- STEP 1: Acoustic Background Music & Speech Envelopes (Primary Master Spine) ---
+        d_ref, d_tar, dt_density = None, None, 0.10
+        try:
+            d_ref, dt_density = self.vad_engine.compute_speech_density(ref_wav_path)
+            d_tar, _ = self.vad_engine.compute_speech_density(tar_wav_path)
+        except Exception:
+            pass
+
         try:
             import scipy.io.wavfile as wavfile
             sr_r, a_r = wavfile.read(ref_wav_path)
@@ -96,6 +103,14 @@ class MultiModalConsensusEngine:
                 peak = corr[best_lag] / (r_norm * t_norm + 1e-8)
 
                 if peak >= 0.40 and tar_actual_t > 0:
+                    # Speech vs Music consistency validation
+                    if d_ref is not None and d_tar is not None:
+                        is_valid, _ = self.vad_engine.validate_anchor_speech_consistency(
+                            float(sec), float(tar_actual_t), d_ref, d_tar, dt=dt_density
+                        )
+                        if not is_valid:
+                            continue
+
                     candidates.append({
                         "ref_time": float(sec),
                         "tar_time": float(tar_actual_t),
@@ -143,6 +158,14 @@ class MultiModalConsensusEngine:
                     tar_f = s_start + best_lag
                     t_tar = tar_f * dt_vad
                     offset = t_tar - t_ref
+
+                    if d_ref is not None and d_tar is not None:
+                        is_valid, _ = self.vad_engine.validate_anchor_speech_consistency(
+                            float(t_ref), float(t_tar), d_ref, d_tar, dt=dt_density
+                        )
+                        if not is_valid:
+                            continue
+
                     candidates.append({
                         "ref_time": float(t_ref),
                         "tar_time": float(t_tar),
@@ -170,6 +193,13 @@ class MultiModalConsensusEngine:
                 )
 
                 if is_acoustically_confirmed:
+                    if d_ref is not None and d_tar is not None:
+                        is_valid, _ = self.vad_engine.validate_anchor_speech_consistency(
+                            m.ref_time, m.tar_time, d_ref, d_tar, dt=dt_density
+                        )
+                        if not is_valid:
+                            continue
+
                     candidates.append({
                         "ref_time": m.ref_time,
                         "tar_time": m.tar_time,
